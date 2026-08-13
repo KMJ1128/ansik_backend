@@ -1,5 +1,6 @@
 package com.kmj.ansik.controller;
 
+import com.kmj.ansik.service.GooglePlaceService;
 import com.kmj.ansik.service.KakaoService;
 import com.kmj.ansik.service.NaverService;
 import com.kmj.ansik.service.PopularPlaceService;
@@ -13,6 +14,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @RestController
 @RequestMapping("/api")
 public class ApiController {
@@ -23,13 +27,16 @@ public class ApiController {
     private final NaverService naverService;
     private final TourService tourService;
     private final PopularPlaceService popularPlaceService;
+    private final GooglePlaceService googlePlaceService; // 💡 구글 서비스 추가
 
     public ApiController(KakaoService kakaoService, NaverService naverService,
-                         TourService tourService, PopularPlaceService popularPlaceService) {
+                         TourService tourService, PopularPlaceService popularPlaceService,
+                         GooglePlaceService googlePlaceService) {
         this.kakaoService = kakaoService;
         this.naverService = naverService;
         this.tourService = tourService;
         this.popularPlaceService = popularPlaceService;
+        this.googlePlaceService = googlePlaceService;
     }
 
     @GetMapping(value = "/place", produces = MediaType.APPLICATION_JSON_VALUE)
@@ -37,11 +44,28 @@ public class ApiController {
         return kakaoService.searchPlace(query);
     }
 
-    // 💡 네이버 이미지 검색으로 원상복구
-    @GetMapping(value = "/image", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<String> searchImage(@RequestParam String query) {
-        log.info("[API] 네이버 이미지 검색 요청 - query={}", query);
-        return naverService.searchImage(query);
+    // 🔥 100% 팩트 기반 이미지 반환 (TourAPI + Google Places)
+    @GetMapping(value = "/image/exact", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<List<String>> getExactImages(
+            @RequestParam(required = false) String tourId,
+            @RequestParam(required = false) String title,
+            @RequestParam(required = false, defaultValue = "0") double mapX,
+            @RequestParam(required = false, defaultValue = "0") double mapY) {
+
+        List<String> images = new ArrayList<>();
+
+        // 1. 공공데이터 공식 갤러리 이미지 확인 (무료이므로 가장 먼저 호출)
+        if (tourId != null && !tourId.isBlank()) {
+            images.addAll(tourService.getTourOfficialImages(tourId));
+        }
+
+        // 2. 모자란 사진은 구글 Places API 로 채우기 (캐시 적용)
+        if (images.size() < 3 && title != null && !title.isBlank()) {
+            // TourAPI는 mapX가 경도(lng), mapY가 위도(lat)임
+            images.addAll(googlePlaceService.getPlaceImages(title, mapY, mapX));
+        }
+
+        return ResponseEntity.ok(images);
     }
 
     @GetMapping(value = "/tour/location", produces = MediaType.APPLICATION_JSON_VALUE)

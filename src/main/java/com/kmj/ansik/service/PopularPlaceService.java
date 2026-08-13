@@ -11,6 +11,8 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 @Service
 public class PopularPlaceService {
@@ -67,9 +69,8 @@ public class PopularPlaceService {
                 return ResponseEntity.ok(createEmptyTourResponse());
             }
 
-            List<ObjectNode> places = new ArrayList<>();
-
-            for (JsonNode doc : kakaoPlaces) {
+            // 💡 병열 스레드로 각 장소별 네이버 리뷰 수 조회 속도 향상
+            List<ObjectNode> places = kakaoPlaces.parallelStream().map(doc -> {
                 String placeName = doc.path("place_name").asText("");
                 String address = doc.path("road_address_name").asText("");
                 if (address.isBlank()) address = doc.path("address_name").asText("");
@@ -77,7 +78,7 @@ public class PopularPlaceService {
                 String y = doc.path("y").asText("");
                 String id = doc.path("id").asText("");
 
-                if (placeName.isBlank()) continue;
+                if (placeName.isBlank()) return null;
 
                 String searchKeyword = restaurantOnly ? placeName + " 맛집" : placeName;
                 int blogCount = naverService.getBlogReviewCount(searchKeyword);
@@ -93,8 +94,8 @@ public class PopularPlaceService {
                 placeObj.put("firstimage2", "");
                 placeObj.put("blogCount", blogCount);
 
-                places.add(placeObj);
-            }
+                return placeObj;
+            }).filter(Objects::nonNull).collect(Collectors.toList());
 
             places.sort((a, b) -> Integer.compare(b.path("blogCount").asInt(0), a.path("blogCount").asInt(0)));
 
