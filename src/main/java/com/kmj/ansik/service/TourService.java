@@ -2,8 +2,6 @@ package com.kmj.ansik.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -11,24 +9,26 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.util.UriComponentsBuilder;
 
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Collectors;
 
 @Service
 public class TourService {
+
     private static final Logger log = LoggerFactory.getLogger(TourService.class);
+    private static final String TOUR_BASE_URL = "https://apis.data.go.kr/B551011/KorService2";
+    private static final int MAX_RESTAURANT_RESULTS = 20;
+
     private final RestTemplate restTemplate;
     private final ObjectMapper mapper = new ObjectMapper();
-    private final NaverService naverService;
 
     @Value("${api.tourapi.key}")
     private String tourApiKey;
 
-    public TourService(NaverService naverService) {
-        this.naverService = naverService;
+    public TourService() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(3000);
         factory.setReadTimeout(5000);
@@ -36,74 +36,57 @@ public class TourService {
     }
 
     public List<String> getTourOfficialImages(String contentId) {
-        List<String> images = new ArrayList<>();
+        return getTourImages(contentId, "Y");
+    }
+
+    public List<String> getTourMenuImages(String contentId) {
+        return getTourImages(contentId, "N");
+    }
+
+    public ResponseEntity<String> getNearbyRestaurants(
+            double mapX,
+            double mapY,
+            int radius
+    ) {
         try {
-            String url = "https://apis.data.go.kr/B551011/KorService2/detailImage1?MobileOS=AND&MobileApp=Ansik&_type=json&imageYN=Y&subImageYN=Y&numOfRows=10&contentId="
-                    + contentId + "&serviceKey=" + tourApiKey;
-            URI uri = new URI(url);
+            URI uri = UriComponentsBuilder
+                    .fromUriString(TOUR_BASE_URL + "/locationBasedList2")
+                    .queryParam("MobileOS", "AND")
+                    .queryParam("MobileApp", "Ansik")
+                    .queryParam("_type", "json")
+                    .queryParam("contentTypeId", 39)
+                    .queryParam("numOfRows", MAX_RESTAURANT_RESULTS)
+                    .queryParam("pageNo", 1)
+                    .queryParam("arrange", "E")
+                    .queryParam("mapX", mapX)
+                    .queryParam("mapY", mapY)
+                    .queryParam("radius", radius)
+                    .queryParam("serviceKey", tourApiKey)
+                    .build(true)
+                    .toUri();
 
             ResponseEntity<String> response = restTemplate.getForEntity(uri, String.class);
             String body = response.getBody();
 
-            if (body == null || body.trim().startsWith("<")) {
-                log.warn("[TOUR DETAIL IMAGE] API 키 오류 또는 트래픽 초과 (XML 수신) - contentId={}", contentId);
-                return images;
+            if (isInvalidTourResponse(body)) {
+                return getEmptyTourResponse();
             }
 
-            JsonNode root = mapper.readTree(body);
-            JsonNode items = root.path("response").path("body").path("items");
-            if (items.isObject() && items.has("item")) {
-                JsonNode itemArray = items.path("item");
-                if (itemArray.isArray()) {
-                    for (JsonNode item : itemArray) {
-                        String img = item.path("originImgurl").asText("");
-                        if (!img.isBlank()) images.add(img.replace("http://", "https://"));
-                    }
-                }
-            }
-        } catch (Exception e) {
-            log.error("[TOUR DETAIL IMAGE] 갤러리 파 파싱 실패 - contentId={}", contentId);
-        }
-        return images;
-    }
+            JsonNode rootNode = mapper.readTree(body);
+            JsonNode itemsNode = rootNode
+                    .path("response")
+                    .path("body")
+                    .path("items");
 
-    public ResponseEntity<String> getNearbyRestaurants(double mapX, double mapY, int radius) {
-        try {
-            String url = "https://apis.data.go.kr/B551011/KorService2/locationBasedList2?MobileOS=AND&MobileApp=Ansik&_type=json&contentTypeId=39&numOfRows=40&pageNo=1&arrange=E&mapX="
-                    + mapX + "&mapY=" + mapY + "&radius=" + radius + "&serviceKey=" + tourApiKey;
-            URI uri = new URI(url);
-
-            ResponseEntity<String> response = restTemplate.getForEntity(uri, String.class);
-            if (response.getBody() == null || response.getBody().trim().startsWith("<")) return getEmptyTourResponse();
-
-            JsonNode rootNode = mapper.readTree(response.getBody());
-            JsonNode itemsNode = rootNode.path("response").path("body").path("items");
-
-            if (itemsNode.isTextual() || !itemsNode.has("item")) return getEmptyTourResponse();
-
-            JsonNode itemArrayNode = itemsNode.path("item");
-            List<JsonNode> rawList = new ArrayList<>();
-            itemArrayNode.forEach(rawList::add);
-
-            List<ObjectNode> placeList = rawList.parallelStream().map(item -> {
-                ObjectNode placeNode = (ObjectNode) item.deepCopy();
-                String title = placeNode.path("title").asText("");
-                int blogCount = naverService.getBlogReviewCount(title + " 식당");
-                placeNode.put("blogCount", blogCount);
-                return placeNode;
-            }).collect(Collectors.toList());
-
-            placeList.sort((a, b) -> Integer.compare(b.path("blogCount").asInt(0), a.path("blogCount").asInt(0)));
-
-            int limit = Math.min(placeList.size(), 20);
-            ArrayNode sortedItemArray = mapper.createArrayNode();
-            for (int i = 0; i < limit; i++) {
-                ObjectNode p = placeList.get(i);
-                p.remove("blogCount");
-                sortedItemArray.add(p);
+            if (!itemsNode.isObject() || !itemsNode.has("item")) {
+                return getEmptyTourResponse();
             }
 
-            ((ObjectNode) itemsNode).set("item", sortedItemArray);
+            JsonNode itemNode = itemsNode.path("item");
+            if (!itemNode.isArray()) {
+                return getEmptyTourResponse();
+            }
+
             return ResponseEntity.ok(mapper.writeValueAsString(rootNode));
         } catch (Exception e) {
             log.error("[TOUR LOCATION] 주변 음식점 검색 실패", e);
@@ -113,14 +96,27 @@ public class TourService {
 
     public ResponseEntity<String> getRestaurantDetails(String contentId) {
         try {
-            String url = "https://apis.data.go.kr/B551011/KorService2/detailIntro2?MobileOS=AND&MobileApp=Ansik&_type=json&contentTypeId=39&numOfRows=1&pageNo=1&contentId="
-                    + contentId + "&serviceKey=" + tourApiKey;
-            URI uri = new URI(url);
+            URI uri = UriComponentsBuilder
+                    .fromUriString(TOUR_BASE_URL + "/detailIntro2")
+                    .queryParam("MobileOS", "AND")
+                    .queryParam("MobileApp", "Ansik")
+                    .queryParam("_type", "json")
+                    .queryParam("contentTypeId", 39)
+                    .queryParam("numOfRows", 1)
+                    .queryParam("pageNo", 1)
+                    .queryParam("contentId", contentId)
+                    .queryParam("serviceKey", tourApiKey)
+                    .build(true)
+                    .toUri();
 
             ResponseEntity<String> response = restTemplate.getForEntity(uri, String.class);
-            if (response.getBody() == null || response.getBody().trim().startsWith("<")) return ResponseEntity.ok("{}");
+            String body = response.getBody();
 
-            JsonNode rootNode = mapper.readTree(response.getBody());
+            if (isInvalidTourResponse(body)) {
+                return ResponseEntity.ok("{}");
+            }
+
+            JsonNode rootNode = mapper.readTree(body);
             return ResponseEntity.ok(mapper.writeValueAsString(rootNode));
         } catch (Exception e) {
             log.error("[TOUR DETAIL] 음식점 상세 검색 실패", e);
@@ -128,7 +124,75 @@ public class TourService {
         }
     }
 
+    private List<String> getTourImages(String contentId, String imageYn) {
+        List<String> images = new ArrayList<>();
+
+        if (contentId == null || contentId.isBlank()) {
+            return images;
+        }
+
+        try {
+            URI uri = UriComponentsBuilder
+                    .fromUriString(TOUR_BASE_URL + "/detailImage2")
+                    .queryParam("MobileOS", "AND")
+                    .queryParam("MobileApp", "Ansik")
+                    .queryParam("_type", "json")
+                    .queryParam("imageYN", imageYn)
+                    .queryParam("subImageYN", "Y")
+                    .queryParam("numOfRows", 20)
+                    .queryParam("pageNo", 1)
+                    .queryParam("contentId", contentId)
+                    .queryParam("serviceKey", tourApiKey)
+                    .build(true)
+                    .toUri();
+
+            ResponseEntity<String> response = restTemplate.getForEntity(uri, String.class);
+            String body = response.getBody();
+
+            if (isInvalidTourResponse(body)) {
+                return images;
+            }
+
+            JsonNode root = mapper.readTree(body);
+            JsonNode itemArray = root
+                    .path("response")
+                    .path("body")
+                    .path("items")
+                    .path("item");
+
+            if (!itemArray.isArray()) {
+                return images;
+            }
+
+            for (JsonNode item : itemArray) {
+                String imageUrl = item.path("originimgurl").asText("");
+                if (imageUrl.isBlank()) {
+                    imageUrl = item.path("originImgurl").asText("");
+                }
+
+                if (!imageUrl.isBlank()) {
+                    images.add(imageUrl.replace("http://", "https://"));
+                }
+            }
+        } catch (Exception e) {
+            log.error(
+                    "[TOUR DETAIL IMAGE] 이미지 조회 실패 - contentId={}, imageYN={}",
+                    contentId,
+                    imageYn,
+                    e
+            );
+        }
+
+        return images.stream().distinct().toList();
+    }
+
+    private boolean isInvalidTourResponse(String body) {
+        return body == null || body.isBlank() || body.trim().startsWith("<");
+    }
+
     private ResponseEntity<String> getEmptyTourResponse() {
-        return ResponseEntity.ok("{\"response\":{\"body\":{\"items\":{\"item\":[]}}}}");
+        return ResponseEntity.ok(
+                "{\"response\":{\"body\":{\"items\":{\"item\":[]}}}}"
+        );
     }
 }
