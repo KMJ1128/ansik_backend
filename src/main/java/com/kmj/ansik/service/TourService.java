@@ -31,7 +31,7 @@ public class TourService {
         this.naverService = naverService;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(3000);
-        factory.setReadTimeout(5000); // 공공데이터는 조금 느릴 수 있어 5초
+        factory.setReadTimeout(5000);
         this.restTemplate = new RestTemplate(factory);
     }
 
@@ -85,7 +85,6 @@ public class TourService {
             List<JsonNode> rawList = new ArrayList<>();
             itemArrayNode.forEach(rawList::add);
 
-            // 💡 속도 극대화: parallelStream으로 네이버 블로그 검색 병열 처리
             List<ObjectNode> placeList = rawList.parallelStream().map(item -> {
                 ObjectNode placeNode = (ObjectNode) item.deepCopy();
                 String title = placeNode.path("title").asText("");
