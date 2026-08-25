@@ -1,11 +1,12 @@
 package com.kmj.ansik.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
@@ -14,24 +15,25 @@ import java.net.URI;
 
 @Service
 public class KakaoService {
+
     private static final Logger log = LoggerFactory.getLogger(KakaoService.class);
+    private static final String KEYWORD_URL = "https://dapi.kakao.com/v2/local/search/keyword.json";
+    private static final String CATEGORY_URL = "https://dapi.kakao.com/v2/local/search/category.json";
+    private static final String RESTAURANT_CATEGORY_CODE = "FD6";
+
     private final RestTemplate restTemplate;
-    private final ObjectMapper mapper = new ObjectMapper();
 
     @Value("${api.kakao.key}")
     private String kakaoKey;
 
     public KakaoService() {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(3000);
-        factory.setReadTimeout(3000);
-        this.restTemplate = new RestTemplate(factory);
+        this.restTemplate = new RestTemplate();
     }
 
-    // 🔥 좌표가 있을 경우 반경 2km 이내 '거리순'으로 먼저 검색하여 동명이인 가게 오류 해결
     public ResponseEntity<String> searchPlace(String query, Double mapX, Double mapY) {
         try {
-            UriComponentsBuilder builder = UriComponentsBuilder.fromUriString("https://dapi.kakao.com/v2/local/search/keyword.json")
+            UriComponentsBuilder builder = UriComponentsBuilder
+                    .fromUriString(KEYWORD_URL)
                     .queryParam("query", query);
 
             if (mapX != null && mapY != null && mapX != 0.0 && mapY != 0.0) {
@@ -41,16 +43,54 @@ public class KakaoService {
                         .queryParam("sort", "distance");
             }
 
-            URI uri = builder.build().encode().toUri();
-
-            HttpHeaders headers = new HttpHeaders();
-            headers.set("Authorization", kakaoKey);
-            HttpEntity<String> entity = new HttpEntity<>(headers);
-
-            return restTemplate.exchange(uri, HttpMethod.GET, entity, String.class);
+            return execute(builder.build().encode().toUri());
         } catch (Exception e) {
             log.error("[KAKAO PLACE] 장소 검색 실패 - query={}", query, e);
             return ResponseEntity.status(500).body("{}");
         }
+    }
+
+    public ResponseEntity<String> searchNearbyRestaurants(
+            double mapX,
+            double mapY,
+            int radius,
+            int page
+    ) {
+        try {
+            int safeRadius = Math.max(100, Math.min(radius, 20000));
+            int safePage = Math.max(1, Math.min(page, 45));
+
+            URI uri = UriComponentsBuilder
+                    .fromUriString(CATEGORY_URL)
+                    .queryParam("category_group_code", RESTAURANT_CATEGORY_CODE)
+                    .queryParam("x", mapX)
+                    .queryParam("y", mapY)
+                    .queryParam("radius", safeRadius)
+                    .queryParam("sort", "distance")
+                    .queryParam("page", safePage)
+                    .queryParam("size", 15)
+                    .build()
+                    .encode()
+                    .toUri();
+
+            return execute(uri);
+        } catch (Exception e) {
+            log.error(
+                    "[KAKAO RESTAURANT] 주변 음식점 검색 실패 - x={}, y={}, radius={}, page={}",
+                    mapX,
+                    mapY,
+                    radius,
+                    page,
+                    e
+            );
+            return ResponseEntity.status(500).body("{}");
+        }
+    }
+
+    private ResponseEntity<String> execute(URI uri) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("Authorization", kakaoKey);
+        HttpEntity<String> entity = new HttpEntity<>(headers);
+        return restTemplate.exchange(uri, HttpMethod.GET, entity, String.class);
     }
 }

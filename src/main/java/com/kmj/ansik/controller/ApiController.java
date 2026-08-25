@@ -1,8 +1,10 @@
 package com.kmj.ansik.controller;
 
+import com.kmj.ansik.dto.NearbyRestaurantDto;
 import com.kmj.ansik.service.GooglePlaceService;
 import com.kmj.ansik.service.KakaoService;
 import com.kmj.ansik.service.NaverService;
+import com.kmj.ansik.service.RestaurantAggregationService;
 import com.kmj.ansik.service.TourService;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -22,17 +24,20 @@ public class ApiController {
     private final NaverService naverService;
     private final TourService tourService;
     private final GooglePlaceService googlePlaceService;
+    private final RestaurantAggregationService restaurantAggregationService;
 
     public ApiController(
             KakaoService kakaoService,
             NaverService naverService,
             TourService tourService,
-            GooglePlaceService googlePlaceService
+            GooglePlaceService googlePlaceService,
+            RestaurantAggregationService restaurantAggregationService
     ) {
         this.kakaoService = kakaoService;
         this.naverService = naverService;
         this.tourService = tourService;
         this.googlePlaceService = googlePlaceService;
+        this.restaurantAggregationService = restaurantAggregationService;
     }
 
     @GetMapping(value = "/place", produces = MediaType.APPLICATION_JSON_VALUE)
@@ -67,6 +72,17 @@ public class ApiController {
                         .distinct()
                         .limit(10)
                         .toList()
+        );
+    }
+
+    @GetMapping(value = "/restaurants/nearby", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<List<NearbyRestaurantDto>> getTourApiNearbyRestaurants(
+            @RequestParam double mapX,
+            @RequestParam double mapY,
+            @RequestParam int radius
+    ) {
+        return ResponseEntity.ok(
+                restaurantAggregationService.getNearbyRestaurants(mapX, mapY, radius)
         );
     }
 

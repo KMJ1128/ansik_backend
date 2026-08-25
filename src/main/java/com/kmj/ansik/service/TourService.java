@@ -138,7 +138,6 @@ public class TourService {
                     .queryParam("MobileApp", "Ansik")
                     .queryParam("_type", "json")
                     .queryParam("imageYN", imageYn)
-                    .queryParam("subImageYN", "Y")
                     .queryParam("numOfRows", 20)
                     .queryParam("pageNo", 1)
                     .queryParam("contentId", contentId)
