@@ -2,6 +2,7 @@ package com.kmj.ansik.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kmj.ansik.logging.ExternalApiLoggingInterceptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -52,6 +53,7 @@ public class GooglePlaceService {
         factory.setConnectTimeout(3000);
         factory.setReadTimeout(3000);
         this.restTemplate = new RestTemplate(factory);
+        this.restTemplate.getInterceptors().add(new ExternalApiLoggingInterceptor("GOOGLE PLACES"));
     }
 
     public List<String> getPlaceImages(String placeName, double lat, double lng) {

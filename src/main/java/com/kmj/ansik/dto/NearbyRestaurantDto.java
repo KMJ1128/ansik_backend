@@ -13,6 +13,8 @@ public class NearbyRestaurantDto {
     private String imageUrl;
     private List<String> imageUrls = new ArrayList<>();
     private String tourContentId;
+    private String tourLanguage = "ko";
+    private boolean koreanFallback;
     private String kakaoPlaceId;
     private List<String> sources = new ArrayList<>();
     private int distanceMeters;
@@ -79,6 +81,22 @@ public class NearbyRestaurantDto {
 
     public void setTourContentId(String tourContentId) {
         this.tourContentId = tourContentId;
+    }
+
+    public String getTourLanguage() {
+        return tourLanguage;
+    }
+
+    public void setTourLanguage(String tourLanguage) {
+        this.tourLanguage = tourLanguage;
+    }
+
+    public boolean isKoreanFallback() {
+        return koreanFallback;
+    }
+
+    public void setKoreanFallback(boolean koreanFallback) {
+        this.koreanFallback = koreanFallback;
     }
 
     public String getKakaoPlaceId() {

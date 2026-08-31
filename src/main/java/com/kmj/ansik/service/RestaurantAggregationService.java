@@ -24,6 +24,7 @@ public class RestaurantAggregationService {
 
     private static final int KAKAO_MAX_PAGES = 2;
     private static final double DUPLICATE_DISTANCE_METERS = 120.0;
+    private static final double MULTILINGUAL_DUPLICATE_DISTANCE_METERS = 30.0;
 
     private final TourService tourService;
     private final KakaoService kakaoService;
@@ -46,15 +47,18 @@ public class RestaurantAggregationService {
     public List<NearbyRestaurantDto> getNearbyRestaurants(
             double mapX,
             double mapY,
-            int radius
+            int radius,
+            String language
     ) {
         long startedAt = System.currentTimeMillis();
+        String requestedLanguage = tourService.normalizeLanguage(language);
 
         log.info(
-                "[RESTAURANT AGGREGATION] TourAPI 등록 식당 검색 시작 - mapX={}, mapY={}, radius={}m",
+                "[RESTAURANT AGGREGATION] TourAPI 등록 식당 검색 시작 - mapX={}, mapY={}, radius={}m, language={}",
                 mapX,
                 mapY,
-                radius
+                radius,
+                requestedLanguage
         );
 
         List<NearbyRestaurantDto> merged = new ArrayList<>();
@@ -64,8 +68,21 @@ public class RestaurantAggregationService {
                 merged,
                 mapX,
                 mapY,
-                radius
+                radius,
+                requestedLanguage,
+                false
         );
+
+        if (!"ko".equals(requestedLanguage)) {
+            addTourRestaurants(
+                    merged,
+                    mapX,
+                    mapY,
+                    radius,
+                    "ko",
+                    true
+            );
+        }
         int tourAddedCount = merged.size() - beforeTourCount;
 
         log.info(
@@ -143,16 +160,20 @@ public class RestaurantAggregationService {
             List<NearbyRestaurantDto> merged,
             double mapX,
             double mapY,
-            int radius
+            int radius,
+            String dataLanguage,
+            boolean koreanFallback
     ) {
         long startedAt =
                 System.currentTimeMillis();
 
         log.info(
-                "[RESTAURANT AGGREGATION][TOUR] 요청 시작 - mapX={}, mapY={}, radius={}m",
+                "[RESTAURANT AGGREGATION][TOUR] 요청 시작 - mapX={}, mapY={}, radius={}m, language={}, fallback={}",
                 mapX,
                 mapY,
-                radius
+                radius,
+                dataLanguage,
+                koreanFallback
         );
 
         try {
@@ -160,7 +181,8 @@ public class RestaurantAggregationService {
                     tourService.getNearbyRestaurants(
                             mapX,
                             mapY,
-                            radius
+                            radius,
+                            dataLanguage
                     );
 
             log.debug(
@@ -227,6 +249,16 @@ public class RestaurantAggregationService {
                     continue;
                 }
 
+                if (koreanFallback) {
+                    NearbyRestaurantDto multilingualDuplicate =
+                            findMultilingualDuplicateByLocation(merged, lat, lng);
+
+                    if (multilingualDuplicate != null) {
+                        mergeTourImages(multilingualDuplicate, item);
+                        continue;
+                    }
+                }
+
                 NearbyRestaurantDto restaurant =
                         new NearbyRestaurantDto();
 
@@ -257,7 +289,7 @@ public class RestaurantAggregationService {
                 restaurant.setId(
                         contentId.isBlank()
                                 ? UUID.randomUUID().toString()
-                                : "tour:" + contentId
+                                : "tour:" + dataLanguage + ":" + contentId
                 );
 
                 restaurant.setTitle(title);
@@ -265,6 +297,8 @@ public class RestaurantAggregationService {
                 restaurant.setLatitude(lat);
                 restaurant.setLongitude(lng);
                 restaurant.setTourContentId(contentId);
+                restaurant.setTourLanguage(dataLanguage);
+                restaurant.setKoreanFallback(koreanFallback);
                 restaurant.setSources(
                         new ArrayList<>(
                                 List.of("TOUR_API")
@@ -314,12 +348,55 @@ public class RestaurantAggregationService {
 
         } catch (Exception e) {
             log.error(
-                    "[RESTAURANT AGGREGATION][TOUR] TourAPI 음식점 파싱 실패 - mapX={}, mapY={}, radius={}m",
+                    "[RESTAURANT AGGREGATION][TOUR] TourAPI 음식점 파싱 실패 - mapX={}, mapY={}, radius={}m, language={}",
                     mapX,
                     mapY,
                     radius,
+                    dataLanguage,
                     e
             );
+        }
+    }
+
+    private NearbyRestaurantDto findMultilingualDuplicateByLocation(
+            List<NearbyRestaurantDto> restaurants,
+            double lat,
+            double lng
+    ) {
+        for (NearbyRestaurantDto existing : restaurants) {
+            double distance = distanceMeters(
+                    existing.getLatitude(),
+                    existing.getLongitude(),
+                    lat,
+                    lng
+            );
+
+            if (distance <= MULTILINGUAL_DUPLICATE_DISTANCE_METERS) {
+                return existing;
+            }
+        }
+
+        return null;
+    }
+
+    private void mergeTourImages(
+            NearbyRestaurantDto existing,
+            JsonNode incoming
+    ) {
+        Set<String> images = new LinkedHashSet<>(existing.getImageUrls());
+        String firstImage = secureUrl(incoming.path("firstimage").asText(""));
+        String secondImage = secureUrl(incoming.path("firstimage2").asText(""));
+
+        if (!firstImage.isBlank()) {
+            images.add(firstImage);
+        }
+        if (!secondImage.isBlank()) {
+            images.add(secondImage);
+        }
+
+        existing.setImageUrls(new ArrayList<>(images));
+        if ((existing.getImageUrl() == null || existing.getImageUrl().isBlank()) && !images.isEmpty()) {
+            existing.setImageUrl(images.iterator().next());
         }
     }
 

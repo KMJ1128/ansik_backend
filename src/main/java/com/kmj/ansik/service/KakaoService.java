@@ -1,5 +1,6 @@
 package com.kmj.ansik.service;
 
+import com.kmj.ansik.logging.ExternalApiLoggingInterceptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -28,6 +29,7 @@ public class KakaoService {
 
     public KakaoService() {
         this.restTemplate = new RestTemplate();
+        this.restTemplate.getInterceptors().add(new ExternalApiLoggingInterceptor("KAKAO LOCAL"));
     }
 
     public ResponseEntity<String> searchPlace(String query, Double mapX, Double mapY) {
