@@ -13,9 +13,8 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.net.URI;
-import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
+import java.time.Duration;
 
 @Service
 public class KFindNutritionService {
@@ -26,12 +25,13 @@ public class KFindNutritionService {
 
     private final RestTemplate restTemplate;
     private final ObjectMapper mapper = new ObjectMapper();
-    private final Map<String, Optional<NutritionInfo>> cache = new ConcurrentHashMap<>();
+    private final PersistentCacheService cacheService;
 
     @Value("${api.kfind.key:}")
     private String apiKey;
 
-    public KFindNutritionService() {
+    public KFindNutritionService(PersistentCacheService cacheService) {
+        this.cacheService = cacheService;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(2500);
         factory.setReadTimeout(3500);
@@ -49,7 +49,30 @@ public class KFindNutritionService {
             return Optional.empty();
         }
 
-        return cache.computeIfAbsent(foodName.trim(), this::requestNutrition);
+        String cacheKey = normalize(foodName);
+        try {
+            String payload = cacheService.getOrLoad(
+                    "kfind-nutrition",
+                    cacheKey,
+                    Duration.ofDays(90),
+                    Duration.ofDays(90),
+                    () -> requestNutrition(foodName.trim())
+                            .map(value -> {
+                                try {
+                                    return mapper.writeValueAsString(value);
+                                } catch (Exception e) {
+                                    throw new IllegalStateException("K-FIND 캐시 직렬화 실패", e);
+                                }
+                            })
+                            .orElse(null)
+            );
+            return payload == null
+                    ? Optional.empty()
+                    : Optional.of(mapper.readValue(payload, NutritionInfo.class));
+        } catch (Exception e) {
+            log.warn("[K-FIND] 캐시 처리 실패, 직접 조회로 대체 - foodName='{}'", foodName, e);
+            return requestNutrition(foodName.trim());
+        }
     }
 
     private Optional<NutritionInfo> requestNutrition(String foodName) {

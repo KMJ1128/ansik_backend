@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.kmj.ansik.dto.RestaurantMenuGuideDto;
 import com.kmj.ansik.dto.RestaurantMenuGuideDto.MenuItem;
 import com.kmj.ansik.logging.ExternalApiLoggingInterceptor;
@@ -11,6 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -40,7 +43,12 @@ public class OpenAiRestaurantMenuService {
     private final ObjectMapper mapper = new ObjectMapper();
     private final RestTemplate restTemplate;
     private final NaverService naverService;
-    private final Map<String, CacheEntry> cache = new ConcurrentHashMap<>();
+    private final PersistentCacheService persistentCacheService;
+    private final ExternalApiBulkhead bulkhead;
+    private final Cache<String, CacheEntry> cache = Caffeine.newBuilder()
+            .maximumSize(1_000)
+            .expireAfterWrite(CACHE_TTL)
+            .build();
     private final Map<String, CompletableFuture<RestaurantMenuGuideDto>> inFlight = new ConcurrentHashMap<>();
 
     @Value("${openai.api-key:}")
@@ -52,13 +60,24 @@ public class OpenAiRestaurantMenuService {
     @Value("${openai.base-url:https://api.openai.com/v1}")
     private String baseUrl;
 
-    public OpenAiRestaurantMenuService(NaverService naverService) {
+    @Autowired
+    public OpenAiRestaurantMenuService(
+            NaverService naverService,
+            PersistentCacheService persistentCacheService,
+            ExternalApiBulkhead bulkhead
+    ) {
         this.naverService = naverService;
+        this.persistentCacheService = persistentCacheService;
+        this.bulkhead = bulkhead;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(5000);
         factory.setReadTimeout(30000);
         this.restTemplate = new RestTemplate(factory);
         this.restTemplate.getInterceptors().add(new ExternalApiLoggingInterceptor("OPENAI RESPONSES"));
+    }
+
+    public OpenAiRestaurantMenuService(NaverService naverService) {
+        this(naverService, null, null);
     }
 
     public RestaurantMenuGuideDto getMenuGuide(
@@ -75,13 +94,24 @@ public class OpenAiRestaurantMenuService {
             String language,
             List<String> menuHints
     ) {
+        return getMenuGuide(restaurantName, address, language, menuHints, List.of());
+    }
+
+    public RestaurantMenuGuideDto getMenuGuide(
+            String restaurantName,
+            String address,
+            String language,
+            List<String> menuHints,
+            List<String> healthConditions
+    ) {
         String safeName = restaurantName == null ? "" : restaurantName.trim();
         String safeAddress = address == null ? "" : address.trim();
         String lang = normalizeLanguage(language);
         List<String> safeHints = normalizeMenuHints(menuHints);
+        List<String> safeHealthConditions = normalizeHealthConditions(healthConditions);
 
-        log.info("[OPENAI MENU] 메뉴 가이드 요청 - restaurant='{}', language={}, addressProvided={}, tourMenuHintCount={}",
-                safeName, lang, !safeAddress.isBlank(), safeHints.size());
+        log.info("[OPENAI MENU] 메뉴 가이드 요청 - restaurant='{}', language={}, addressProvided={}, tourMenuHintCount={}, healthConditionCount={}",
+                safeName, lang, !safeAddress.isBlank(), safeHints.size(), safeHealthConditions.size());
 
         if (safeName.isBlank()) {
             return RestaurantMenuGuideDto.unavailable(
@@ -101,12 +131,29 @@ public class OpenAiRestaurantMenuService {
             );
         }
 
-        String cacheKey = normalizeCacheKey(safeName, safeAddress, lang, safeHints);
-        CacheEntry cached = cache.get(cacheKey);
+        String cacheKey = normalizeCacheKey(safeName, safeAddress, lang, safeHints, safeHealthConditions);
+        CacheEntry cached = cache.getIfPresent(cacheKey);
         if (cached != null && cached.expiresAt().isAfter(Instant.now())) {
             log.info("[OPENAI MENU] 캐시 사용 - restaurant='{}', menuCount={}, expiresAt={}",
                     safeName, cached.guide().menus().size(), cached.expiresAt());
             return cached.guide();
+        }
+
+        if (safeHealthConditions.isEmpty() && persistentCacheService != null) {
+            try {
+                var persistent = persistentCacheService.get("openai-restaurant-menu", cacheKey);
+                if (persistent.isPresent()) {
+                    RestaurantMenuGuideDto guide = mapper.readValue(
+                            persistent.get(), RestaurantMenuGuideDto.class
+                    );
+                    cache.put(cacheKey, new CacheEntry(guide, Instant.now().plus(CACHE_TTL)));
+                    log.info("[OPENAI MENU] MySQL 캐시 사용 - restaurant='{}'", safeName);
+                    return guide;
+                }
+            } catch (Exception cacheReadFailure) {
+                log.warn("[OPENAI MENU] MySQL 캐시 역직렬화 실패 - restaurant='{}'",
+                        safeName, cacheReadFailure);
+            }
         }
 
         CompletableFuture<RestaurantMenuGuideDto> ownRequest = new CompletableFuture<>();
@@ -116,9 +163,22 @@ public class OpenAiRestaurantMenuService {
             return existingRequest.join();
         }
         try {
-            RestaurantMenuGuideDto guide = requestMenuGuide(safeName, safeAddress, lang, safeHints);
+            RestaurantMenuGuideDto guide = requestMenuGuide(
+                    safeName, safeAddress, lang, safeHints, safeHealthConditions
+            );
             if ("OPENAI_READY".equals(guide.status())) {
                 cache.put(cacheKey, new CacheEntry(guide, Instant.now().plus(CACHE_TTL)));
+                if (safeHealthConditions.isEmpty() && persistentCacheService != null) {
+                    try {
+                        persistentCacheService.put(
+                                "openai-restaurant-menu", cacheKey, mapper.writeValueAsString(guide),
+                                Duration.ofDays(7), Duration.ofDays(7)
+                        );
+                    } catch (Exception cacheWriteFailure) {
+                        log.warn("[OPENAI MENU] MySQL 캐시 직렬화 실패 - restaurant='{}'",
+                                safeName, cacheWriteFailure);
+                    }
+                }
             }
             ownRequest.complete(guide);
             log.info("[OPENAI MENU] 메뉴 가이드 처리 종료 - restaurant='{}', status={}, menuCount={}",
@@ -136,7 +196,8 @@ public class OpenAiRestaurantMenuService {
             String restaurantName,
             String address,
             String language,
-            List<String> menuHints
+            List<String> menuHints,
+            List<String> healthConditions
     ) {
         long startedAt = System.nanoTime();
         boolean useTourMenuHints = !menuHints.isEmpty();
@@ -147,7 +208,9 @@ public class OpenAiRestaurantMenuService {
             ObjectNode request = mapper.createObjectNode();
             request.put("model", model);
             request.put("store", false);
-            request.put("max_output_tokens", useTourMenuHints ? 1100 : 1300);
+            request.put("max_output_tokens", healthConditions.isEmpty()
+                    ? (useTourMenuHints ? 1100 : 1300)
+                    : (useTourMenuHints ? 1500 : 1700));
             request.set("reasoning", mapper.createObjectNode().put("effort", useTourMenuHints ? "none" : "low"));
             if (!useTourMenuHints) {
                 request.put("max_tool_calls", 1);
@@ -158,8 +221,8 @@ public class OpenAiRestaurantMenuService {
                 ));
                 request.set("include", mapper.createArrayNode().add("web_search_call.action.sources"));
             }
-            request.put("instructions", instructions(language, useTourMenuHints));
-            request.put("input", requestInput(restaurantName, address, menuHints));
+            request.put("instructions", instructions(language, useTourMenuHints, !healthConditions.isEmpty()));
+            request.put("input", requestInput(restaurantName, address, menuHints, healthConditions));
             ObjectNode textConfig = mapper.createObjectNode();
             textConfig.put("verbosity", "low");
             textConfig.set("format", structuredOutputFormat());
@@ -169,12 +232,13 @@ public class OpenAiRestaurantMenuService {
             headers.setBearerAuth(apiKey);
             headers.setContentType(MediaType.APPLICATION_JSON);
 
-            ResponseEntity<String> response = restTemplate.exchange(
+            java.util.function.Supplier<ResponseEntity<String>> openAiCall = () -> restTemplate.exchange(
                     URI.create(baseUrl.replaceAll("/$", "") + "/responses"),
-                    HttpMethod.POST,
-                    new HttpEntity<>(request.toString(), headers),
-                    String.class
+                    HttpMethod.POST, new HttpEntity<>(request.toString(), headers), String.class
             );
+            ResponseEntity<String> response = bulkhead == null
+                    ? openAiCall.get()
+                    : bulkhead.openAi(openAiCall);
 
             JsonNode responseRoot = mapper.readTree(response.getBody());
             log.info(
@@ -264,7 +328,11 @@ public class OpenAiRestaurantMenuService {
                     stringList(node.path("typicalIngredients")),
                     stringList(node.path("possibleAllergens")),
                     sources,
-                    node.path("confidence").asText("medium")
+                    node.path("confidence").asText("medium"),
+                    normalizeRiskLevel(node.path("healthRiskLevel").asText("unknown")),
+                    node.path("healthRiskSummary").asText("").trim(),
+                    stringList(node.path("healthRiskReasons")).stream().limit(4).toList(),
+                    stringList(node.path("questionsForRestaurant")).stream().limit(3).toList()
             ));
         }
         Map<String, String> requestContext = MDC.getCopyOfContextMap();
@@ -277,7 +345,11 @@ public class OpenAiRestaurantMenuService {
                             candidate.possibleAllergens(),
                             naverService.getMenuImages(candidate.imageSearchQuery()),
                             candidate.sourceUrls(),
-                            candidate.confidence()
+                            candidate.confidence(),
+                            candidate.healthRiskLevel(),
+                            candidate.healthRiskSummary(),
+                            candidate.healthRiskReasons(),
+                            candidate.questionsForRestaurant()
                     )))
                 .toList();
     }
@@ -334,9 +406,13 @@ public class OpenAiRestaurantMenuService {
                           "typicalIngredients": {"type": "array", "items": {"type": "string"}},
                           "possibleAllergens": {"type": "array", "items": {"type": "string"}},
                           "sourceUrls": {"type": "array", "items": {"type": "string"}},
-                          "confidence": {"type": "string", "enum": ["high", "medium", "low"]}
+                          "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                          "healthRiskLevel": {"type": "string", "enum": ["safe", "caution", "avoid", "unknown"]},
+                          "healthRiskSummary": {"type": "string"},
+                          "healthRiskReasons": {"type": "array", "items": {"type": "string"}},
+                          "questionsForRestaurant": {"type": "array", "items": {"type": "string"}}
                         },
-                        "required": ["name", "imageSearchQuery", "description", "tasteTags", "typicalIngredients", "possibleAllergens", "sourceUrls", "confidence"]
+                        "required": ["name", "imageSearchQuery", "description", "tasteTags", "typicalIngredients", "possibleAllergens", "sourceUrls", "confidence", "healthRiskLevel", "healthRiskSummary", "healthRiskReasons", "questionsForRestaurant"]
                       }
                     }
                   },
@@ -368,10 +444,19 @@ public class OpenAiRestaurantMenuService {
         throw new IllegalStateException("OpenAI response did not contain output_text");
     }
 
-    private String instructions(String language, boolean useTourMenuHints) {
+    private String instructions(String language, boolean useTourMenuHints, boolean assessHealth) {
         String evidenceRule = useTourMenuHints
                 ? "Treat the supplied TourAPI menu text as the restaurant menu evidence. Split combined text into at most 6 distinct menu items. sourceUrls must be empty."
                 : "Use one concise web search to verify the restaurant by name and address. Return only sourced menu items and include 1-2 supporting URLs per item. If not verified, set matchedRestaurant=false.";
+        String healthRule = assessHealth
+                ? """
+                Compare every menu with the supplied health conditions. This is cautious food screening, not diagnosis.
+                Use avoid only for a direct allergy, prohibited ingredient, or clear dietary/religious conflict.
+                Use caution for likely condition-related concerns (such as sodium, sugar, saturated fat, purines, potassium, or irritating ingredients) and whenever preparation is uncertain.
+                Use safe only when no conflict is evident from typical ingredients; never claim guaranteed safety. Use unknown when evidence is insufficient.
+                Write one short localized summary, at most 4 concise reasons, and at most 3 practical questions to ask the restaurant.
+                """
+                : "Set healthRiskLevel to unknown and all health assessment text/array fields to empty values.";
         return """
                 Build a compact menu guide for travelers. %s
                 Never invent restaurant-specific menus or recipes. Explain each listed dish generally.
@@ -381,15 +466,25 @@ public class OpenAiRestaurantMenuService {
                 Remove restaurant brands, neighborhood names, marketing adjectives, and proprietary prefixes from imageSearchQuery.
                 Example: '신당동떡볶이' or '열불떡볶이' should use '떡볶이'; '하니 보쌈' should use '보쌈'.
                 Never include the restaurant name, address, price, 'etc.', representative-menu labels, or set/course labels in imageSearchQuery.
+                %s
                 Use empty arrays when uncertain. Output language: %s. Maximum 6 menus; descriptions under 45 words.
-                """.formatted(evidenceRule, language);
+                """.formatted(evidenceRule, healthRule, language);
     }
 
-    private String requestInput(String restaurantName, String address, List<String> menuHints) {
+    private String requestInput(
+            String restaurantName,
+            String address,
+            List<String> menuHints,
+            List<String> healthConditions
+    ) {
         StringBuilder input = new StringBuilder("Restaurant: ").append(restaurantName)
                 .append("\nAddress: ").append(address);
         if (!menuHints.isEmpty()) {
             input.append("\nTourAPI menu text: ").append(String.join(" | ", menuHints));
+        }
+        if (!healthConditions.isEmpty()) {
+            input.append("\nUser health/diet/allergy/religious conditions: ")
+                    .append(String.join(" | ", healthConditions));
         }
         return input.toString();
     }
@@ -411,8 +506,15 @@ public class OpenAiRestaurantMenuService {
         return "ko";
     }
 
-    private String normalizeCacheKey(String name, String address, String language, List<String> menuHints) {
-        return (name + "|" + address + "|" + language + "|" + String.join("|", menuHints))
+    private String normalizeCacheKey(
+            String name,
+            String address,
+            String language,
+            List<String> menuHints,
+            List<String> healthConditions
+    ) {
+        return (name + "|" + address + "|" + language + "|" + String.join("|", menuHints)
+                + "|health:" + String.join("|", healthConditions))
                 .toLowerCase(Locale.ROOT)
                 .replaceAll("\\s+", " ")
                 .trim();
@@ -428,6 +530,26 @@ public class OpenAiRestaurantMenuService {
                 .limit(2)
                 .map(value -> value.length() <= 600 ? value : value.substring(0, 600))
                 .toList();
+    }
+
+    private List<String> normalizeHealthConditions(List<String> healthConditions) {
+        if (healthConditions == null) return List.of();
+        return healthConditions.stream()
+                .filter(value -> value != null && !value.isBlank())
+                .map(value -> value.replaceAll("[\\r\\n\\t]", " ").replaceAll("\\s+", " ").trim())
+                .filter(value -> !value.isBlank())
+                .distinct()
+                .sorted()
+                .limit(20)
+                .map(value -> value.length() <= 80 ? value : value.substring(0, 80))
+                .toList();
+    }
+
+    private String normalizeRiskLevel(String value) {
+        return switch (value.toLowerCase(Locale.ROOT)) {
+            case "safe", "caution", "avoid" -> value.toLowerCase(Locale.ROOT);
+            default -> "unknown";
+        };
     }
 
     private String disclaimer(String language) {
@@ -450,7 +572,11 @@ public class OpenAiRestaurantMenuService {
             List<String> typicalIngredients,
             List<String> possibleAllergens,
             List<String> sourceUrls,
-            String confidence
+            String confidence,
+            String healthRiskLevel,
+            String healthRiskSummary,
+            List<String> healthRiskReasons,
+            List<String> questionsForRestaurant
     ) {
     }
 }

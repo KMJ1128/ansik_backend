@@ -4,10 +4,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.kmj.ansik.logging.ExternalApiLoggingInterceptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.*;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
@@ -15,6 +17,7 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.net.URI;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -38,7 +41,13 @@ public class NaverService {
             "게임", "공략", "캐릭터", "웹툰", "만화", "일러스트", "스킨", "퀘스트", "아이템",
             "로고", "포스터", "배경화면", "장난감", "피규어"
     );
+    private static final Set<String> LOW_QUALITY_IMAGE_WORDS = Set.of(
+            "쇼핑", "상품", "판매", "가격", "쿠폰", "광고", "배너", "전단지", "메뉴판",
+            "포장", "밀키트", "간편식", "냉동", "배달", "리뷰 이벤트", "스티커", "아이콘"
+    );
     private final RestTemplate restTemplate;
+    private final PersistentCacheService persistentCacheService;
+    private final ExternalApiBulkhead bulkhead;
     private final ObjectMapper mapper = new ObjectMapper();
     private final Map<String, List<String>> imageCache = Collections.synchronizedMap(
             new LinkedHashMap<String, List<String>>(200, 0.75f, true) {
@@ -55,12 +64,22 @@ public class NaverService {
     @Value("${api.naver.client-secret}")
     private String naverClientSecret;
 
-    public NaverService() {
+    @Autowired
+    public NaverService(
+            PersistentCacheService persistentCacheService,
+            ExternalApiBulkhead bulkhead
+    ) {
+        this.persistentCacheService = persistentCacheService;
+        this.bulkhead = bulkhead;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(3000);
         factory.setReadTimeout(3000);
         this.restTemplate = new RestTemplate(factory);
         this.restTemplate.getInterceptors().add(new ExternalApiLoggingInterceptor("NAVER SEARCH"));
+    }
+
+    public NaverService() {
+        this(null, null);
     }
 
     public int getBlogReviewCount(String placeName) {
@@ -75,7 +94,9 @@ public class NaverService {
             headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
             HttpEntity<String> entity = new HttpEntity<>(headers);
 
-            ResponseEntity<String> response = restTemplate.exchange(uri, HttpMethod.GET, entity, String.class);
+            ResponseEntity<String> response = naverRequest(
+                    () -> restTemplate.exchange(uri, HttpMethod.GET, entity, String.class)
+            );
             if (response.getBody() != null) {
                 JsonNode root = mapper.readTree(response.getBody());
                 return root.path("total").asInt(0);
@@ -100,6 +121,23 @@ public class NaverService {
         if (cached != null) {
             log.info("[NAVER IMAGE] 캐시 사용 - query='{}', imageCount={}", cleanMenuName, cached.size());
             return cached;
+        }
+        if (persistentCacheService != null) {
+            try {
+                var persistent = persistentCacheService.get("naver-menu-images", cacheKey);
+                if (persistent.isPresent()) {
+                    List<String> images = mapper.readValue(
+                            persistent.get(), new TypeReference<List<String>>() { }
+                    );
+                    imageCache.put(cacheKey, images);
+                    log.info("[NAVER IMAGE] MySQL 캐시 사용 - query='{}', imageCount={}",
+                            cleanMenuName, images.size());
+                    return images;
+                }
+            } catch (Exception cacheReadFailure) {
+                log.warn("[NAVER IMAGE] MySQL 캐시 역직렬화 실패 - query='{}'",
+                        cleanMenuName, cacheReadFailure);
+            }
         }
 
         CompletableFuture<List<String>> ownRequest = new CompletableFuture<>();
@@ -127,12 +165,9 @@ public class NaverService {
             headers.set("X-NCP-APIGW-API-KEY", naverClientSecret);
             headers.setAccept(List.of(MediaType.APPLICATION_JSON));
 
-            ResponseEntity<String> response = restTemplate.exchange(
-                    uri,
-                    HttpMethod.GET,
-                    new HttpEntity<>(headers),
-                    String.class
-            );
+            ResponseEntity<String> response = naverRequest(() -> restTemplate.exchange(
+                    uri, HttpMethod.GET, new HttpEntity<>(headers), String.class
+            ));
 
             JsonNode items = mapper.readTree(response.getBody()).path("items");
             List<ImageCandidate> images = new ArrayList<>();
@@ -140,7 +175,11 @@ public class NaverService {
                 for (JsonNode item : items) {
                     String title = cleanSearchText(item.path("title").asText(""));
                     String sourceLink = item.path("link").asText("");
-                    int relevance = calculateImageRelevance(cleanMenuName, title, sourceLink);
+                    int width = item.path("sizewidth").asInt(0);
+                    int height = item.path("sizeheight").asInt(0);
+                    int relevance = calculateImageRelevance(
+                            cleanMenuName, title, sourceLink, width, height
+                    );
                     if (relevance <= 0) {
                         continue;
                     }
@@ -157,12 +196,24 @@ public class NaverService {
 
             List<String> result = images.stream()
                     .sorted((left, right) -> Integer.compare(right.relevance(), left.relevance()))
+                    .filter(candidate -> candidate.relevance() >= 130)
                     .map(ImageCandidate::url)
                     .distinct()
                     .limit(3)
                     .toList();
             if (!result.isEmpty()) {
                 imageCache.put(cacheKey, result);
+                if (persistentCacheService != null) {
+                    try {
+                        persistentCacheService.put(
+                                "naver-menu-images", cacheKey, mapper.writeValueAsString(result),
+                                Duration.ofDays(7), Duration.ofDays(7)
+                        );
+                    } catch (Exception cacheWriteFailure) {
+                        log.warn("[NAVER IMAGE] MySQL 캐시 직렬화 실패 - query='{}'",
+                                cleanMenuName, cacheWriteFailure);
+                    }
+                }
             }
             ownRequest.complete(result);
             log.info("[NAVER IMAGE] 정확 음식명 검색 완료 - query='{}', reviewed={}, imageCount={}",
@@ -187,22 +238,41 @@ public class NaverService {
                 .trim();
     }
 
-    private int calculateImageRelevance(String menuName, String title, String sourceLink) {
+    private int calculateImageRelevance(
+            String menuName,
+            String title,
+            String sourceLink,
+            int width,
+            int height
+    ) {
         String menuKey = normalizeForMatch(menuName);
         String titleKey = normalizeForMatch(title);
         if (menuKey.length() < 2 || titleKey.isBlank()) return 0;
 
         String combined = (title + " " + sourceLink).toLowerCase();
         if (IRRELEVANT_CONTEXT_WORDS.stream().anyMatch(combined::contains)) return 0;
+        if (LOW_QUALITY_IMAGE_WORDS.stream().anyMatch(combined::contains)) return 0;
         boolean exactDishName = titleKey.contains(menuKey);
+        if (!exactDishName) return 0;
         boolean foodContext = FOOD_CONTEXT_WORDS.stream().anyMatch(combined::contains);
         if (!foodContext && !exactDishName) return 0;
 
-        int score = exactDishName ? 100 : 0;
+        if (width > 0 && height > 0) {
+            if (width < 500 || height < 350) return 0;
+            double aspectRatio = (double) width / height;
+            if (aspectRatio < 0.5 || aspectRatio > 2.0) return 0;
+        }
+
+        int score = 100;
         for (String token : meaningfulMenuTokens(menuName)) {
             if (titleKey.contains(normalizeForMatch(token))) score += 25;
         }
         if (foodContext) score += 20;
+        if (width >= 800 && height >= 600) score += 25;
+        else if (width >= 500 && height >= 350) score += 10;
+        if (combined.contains("레시피") || combined.contains("요리") || combined.contains("맛집")) {
+            score += 10;
+        }
         return score >= 25 ? score : 0;
     }
 
@@ -258,7 +328,9 @@ public class NaverService {
             headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
             HttpEntity<String> entity = new HttpEntity<>(headers);
 
-            ResponseEntity<String> response = restTemplate.exchange(uri, HttpMethod.GET, entity, String.class);
+            ResponseEntity<String> response = naverRequest(
+                    () -> restTemplate.exchange(uri, HttpMethod.GET, entity, String.class)
+            );
 
             if (response.getBody() != null) {
                 JsonNode root = mapper.readTree(response.getBody());
@@ -291,6 +363,10 @@ public class NaverService {
             log.error("[NAVER BLOG] 블로그 리뷰 리스트 검색 실패 - placeName={}", placeName, e);
         }
         return ResponseEntity.ok("[]");
+    }
+
+    private <T> T naverRequest(java.util.function.Supplier<T> action) {
+        return bulkhead == null ? action.get() : bulkhead.naver(action);
     }
 
     private List<String> addressSignals(String address) {

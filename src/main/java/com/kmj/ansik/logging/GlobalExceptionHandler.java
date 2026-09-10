@@ -1,5 +1,6 @@
 package com.kmj.ansik.logging;
 
+import com.kmj.ansik.service.AuthException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,6 +17,16 @@ import java.util.Map;
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    @ExceptionHandler(AuthException.class)
+    public ResponseEntity<Map<String, String>> handleAuth(AuthException exception, HttpServletRequest request) {
+        log.warn("[AUTH ERROR] path={}, status={}, message={}",
+                request.getRequestURI(), exception.getStatus().value(), exception.getMessage());
+        return ResponseEntity.status(exception.getStatus()).body(Map.of(
+                "status", exception.getStatus().name(),
+                "message", exception.getMessage()
+        ));
+    }
 
     @ExceptionHandler({MissingServletRequestParameterException.class, MethodArgumentNotValidException.class})
     public ResponseEntity<Map<String, String>> handleBadRequest(Exception exception, HttpServletRequest request) {

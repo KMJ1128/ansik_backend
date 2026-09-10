@@ -34,7 +34,11 @@ public record RestaurantMenuGuideDto(
             List<String> possibleAllergens,
             List<String> imageUrls,
             List<String> sourceUrls,
-            String confidence
+            String confidence,
+            String healthRiskLevel,
+            String healthRiskSummary,
+            List<String> healthRiskReasons,
+            List<String> questionsForRestaurant
     ) {
     }
 }

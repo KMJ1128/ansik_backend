@@ -28,7 +28,8 @@ out/
 logs/
 *.log
 .env.properties
-.env.properties
+.auth.properties
+.providers.properties
 
 ### NetBeans ###
 /nbproject/private/

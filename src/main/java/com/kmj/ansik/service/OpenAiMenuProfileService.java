@@ -3,6 +3,8 @@ package com.kmj.ansik.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.kmj.ansik.dto.MenuProfileDto;
 import com.kmj.ansik.dto.MenuProfileDto.NutritionInfo;
 import com.kmj.ansik.logging.ExternalApiLoggingInterceptor;
@@ -24,8 +26,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class OpenAiMenuProfileService {
@@ -36,7 +36,12 @@ public class OpenAiMenuProfileService {
     private final ObjectMapper mapper = new ObjectMapper();
     private final RestTemplate restTemplate;
     private final KFindNutritionService nutritionService;
-    private final Map<String, CacheEntry> cache = new ConcurrentHashMap<>();
+    private final PersistentCacheService persistentCacheService;
+    private final ExternalApiBulkhead bulkhead;
+    private final Cache<String, CacheEntry> cache = Caffeine.newBuilder()
+            .maximumSize(2_000)
+            .expireAfterWrite(CACHE_TTL)
+            .build();
 
     @Value("${openai.api-key:}")
     private String apiKey;
@@ -47,8 +52,14 @@ public class OpenAiMenuProfileService {
     @Value("${openai.base-url:https://api.openai.com/v1}")
     private String baseUrl;
 
-    public OpenAiMenuProfileService(KFindNutritionService nutritionService) {
+    public OpenAiMenuProfileService(
+            KFindNutritionService nutritionService,
+            PersistentCacheService persistentCacheService,
+            ExternalApiBulkhead bulkhead
+    ) {
         this.nutritionService = nutritionService;
+        this.persistentCacheService = persistentCacheService;
+        this.bulkhead = bulkhead;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(5000);
         factory.setReadTimeout(20000);
@@ -70,15 +81,35 @@ public class OpenAiMenuProfileService {
         }
 
         String cacheKey = (safeName + "|" + lang).toLowerCase(Locale.ROOT);
-        CacheEntry cached = cache.get(cacheKey);
+        CacheEntry cached = cache.getIfPresent(cacheKey);
         if (cached != null && cached.expiresAt().isAfter(Instant.now())) {
             log.info("[OPENAI PROFILE] 캐시 사용 - menuName='{}', language={}", safeName, lang);
             return cached.profile();
         }
 
+        try {
+            var persistent = persistentCacheService.get("openai-menu-profile", cacheKey);
+            if (persistent.isPresent()) {
+                MenuProfileDto profile = mapper.readValue(persistent.get(), MenuProfileDto.class);
+                cache.put(cacheKey, new CacheEntry(profile, Instant.now().plus(CACHE_TTL)));
+                log.info("[OPENAI PROFILE] MySQL 캐시 사용 - menuName='{}', language={}", safeName, lang);
+                return profile;
+            }
+        } catch (Exception cacheReadFailure) {
+            log.warn("[OPENAI PROFILE] MySQL 캐시 역직렬화 실패 - menuName='{}'", safeName, cacheReadFailure);
+        }
+
         MenuProfileDto profile = requestProfile(safeName, lang, fallback);
         if (profile.matchStatus().startsWith("OPENAI")) {
             cache.put(cacheKey, new CacheEntry(profile, Instant.now().plus(CACHE_TTL)));
+            try {
+                persistentCacheService.put(
+                        "openai-menu-profile", cacheKey, mapper.writeValueAsString(profile),
+                        Duration.ofDays(30), Duration.ofDays(30)
+                );
+            } catch (Exception cacheWriteFailure) {
+                log.warn("[OPENAI PROFILE] MySQL 캐시 직렬화 실패 - menuName='{}'", safeName, cacheWriteFailure);
+            }
         }
         return profile;
     }
@@ -103,12 +134,11 @@ public class OpenAiMenuProfileService {
             HttpHeaders headers = new HttpHeaders();
             headers.setBearerAuth(apiKey);
             headers.setContentType(MediaType.APPLICATION_JSON);
-            ResponseEntity<String> response = restTemplate.exchange(
+            java.util.function.Supplier<ResponseEntity<String>> openAiCall = () -> restTemplate.exchange(
                     URI.create(baseUrl.replaceAll("/$", "") + "/responses"),
-                    HttpMethod.POST,
-                    new HttpEntity<>(request.toString(), headers),
-                    String.class
+                    HttpMethod.POST, new HttpEntity<>(request.toString(), headers), String.class
             );
+            ResponseEntity<String> response = bulkhead.openAi(openAiCall);
 
             JsonNode responseRoot = mapper.readTree(response.getBody());
             String outputText = extractOutputText(responseRoot);

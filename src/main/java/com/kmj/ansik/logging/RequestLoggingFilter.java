@@ -25,7 +25,8 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
     private static final String REQUEST_ID_HEADER = "X-Request-ID";
     private static final Set<String> REDACTED_PARAMETER_NAMES = Set.of(
             "key", "apikey", "api_key", "servicekey", "token", "authorization",
-            "password", "secret", "clientsecret", "client_secret"
+            "password", "secret", "clientsecret", "client_secret",
+            "mapx", "mapy", "lat", "lng", "latitude", "longitude"
     );
 
     @Override
@@ -41,11 +42,10 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
 
         String parameters = safeParameters(request);
         log.info(
-                "[HTTP REQUEST] 시작 - method={}, path={}, params={}, client={}",
+                "[HTTP REQUEST] 시작 - method={}, path={}, params={}",
                 request.getMethod(),
                 request.getRequestURI(),
-                parameters,
-                resolveClientAddress(request)
+                parameters
         );
 
         try {
@@ -102,14 +102,6 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
                     values.add(name + "=" + value);
                 });
         return values.isEmpty() ? "-" : String.join("&", values);
-    }
-
-    private String resolveClientAddress(HttpServletRequest request) {
-        String forwarded = request.getHeader("X-Forwarded-For");
-        if (forwarded != null && !forwarded.isBlank()) {
-            return abbreviate(forwarded.split(",")[0].trim(), 64);
-        }
-        return request.getRemoteAddr();
     }
 
     private String abbreviate(String value, int limit) {

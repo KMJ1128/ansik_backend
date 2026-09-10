@@ -91,7 +91,11 @@ public class KakaoService {
 
     private ResponseEntity<String> execute(URI uri) {
         HttpHeaders headers = new HttpHeaders();
-        headers.set("Authorization", kakaoKey);
+        String authorization = kakaoKey == null ? "" : kakaoKey.trim();
+        if (!authorization.regionMatches(true, 0, "KakaoAK ", 0, 8)) {
+            authorization = "KakaoAK " + authorization;
+        }
+        headers.set("Authorization", authorization);
         HttpEntity<String> entity = new HttpEntity<>(headers);
         return restTemplate.exchange(uri, HttpMethod.GET, entity, String.class);
     }
