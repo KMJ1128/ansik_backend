@@ -1,0 +1,18 @@
+[Unit]
+Description=Ansik Spring Boot API
+After=network-online.target
+
+[Service]
+Type=simple
+User=ansik
+Group=ansik
+WorkingDirectory=/opt/ansik
+ExecStart=/usr/bin/java -Xms256m -Xmx1536m -XX:+UseG1GC -jar /opt/ansik/ansik.jar
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
