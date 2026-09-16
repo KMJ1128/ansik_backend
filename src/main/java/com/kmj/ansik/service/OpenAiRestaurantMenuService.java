@@ -439,8 +439,11 @@ public class OpenAiRestaurantMenuService {
                 Build a compact menu guide for travelers. %s
                 Never invent restaurant-specific menus or recipes. Explain each listed dish generally.
                 Keep name exactly as the original Korean menu for ordering and matching.
-                Set displayName to a concise, understandable dish name in the output language.
-                For English, Japanese and Chinese, translate the food meaning, not just Korean pronunciation.
+                
+                [DisplayName Rule]
+                - If output language is Korean (ko), displayName MUST be identical to the clean menu name (e.g., '갈비정식'). Never duplicate, repeat, or combine words (e.g., NEVER output '갈비정식 갈비정식').
+                - For other languages (en, ja, zh), provide a natural name in that language without duplicating or combining it with the original text.
+                
                 Include a short description, taste tags, typical ingredients, and only directly implied possible allergens.
                 %s
                 Use empty arrays when uncertain. Output language: %s. Maximum 6 menus; descriptions under 45 words.
@@ -536,7 +539,7 @@ public class OpenAiRestaurantMenuService {
             default -> "공개 웹 자료를 바탕으로 정리한 메뉴입니다. 일반 재료 정보는 식당의 현재 판매 내용·실제 조리법과 다를 수 있으므로 가격과 알레르기 성분은 식당에 확인하세요.";
         };
     }
-
+//
     private record CacheEntry(RestaurantMenuGuideDto guide, Instant expiresAt) {
     }
 
