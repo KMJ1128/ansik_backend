@@ -15,6 +15,7 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.net.URI;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
@@ -92,8 +93,85 @@ public class TourService {
         return getTourImages(contentId, "Y", language);
     }
 
-    public List<String> getTourMenuImages(String contentId, String language) {
-        return getTourImages(contentId, "N", language);
+    public List<String> findOfficialPlaceImages(String name, double latitude, double longitude) {
+        if (name == null || name.isBlank() || latitude == 0 || longitude == 0) return List.of();
+        try {
+            URI uri = UriComponentsBuilder.fromUriString(TOUR_API_ROOT + "/KorService2/locationBasedList2")
+                    .queryParam("MobileOS", "AND").queryParam("MobileApp", "Ansik")
+                    .queryParam("_type", "json").queryParam("numOfRows", 100).queryParam("pageNo", 1)
+                    .queryParam("mapX", longitude).queryParam("mapY", latitude).queryParam("radius", 1500)
+                    .queryParam("arrange", "E").queryParam("serviceKey", tourApiKey).build(true).toUri();
+            JsonNode items = mapper.readTree(requestValidBody(uri)).path("response").path("body").path("items").path("item");
+            String target = normalizeTourName(name);
+            for (JsonNode item : items) {
+                String candidate = normalizeTourName(item.path("title").asText(""));
+                if (!candidate.equals(target)) continue;
+                String first = item.path("firstimage").asText("");
+                if (first.isBlank()) first = item.path("firstimage2").asText("");
+                if (!first.isBlank()) return List.of(first.replace("http://", "https://"));
+                return getTourOfficialImages(item.path("contentid").asText(""), "ko");
+            }
+        } catch (Exception e) {
+            log.warn("[TOUR IMAGE] 장소 재매칭 실패 - name={}", name);
+        }
+        return List.of();
+    }
+
+    public record PlaceStory(String title, String overview, List<String> images, String language) {}
+
+    public PlaceStory getPlaceStory(String title, double latitude, double longitude, String language) {
+        String requested = normalizeLanguage(language);
+        for (String lang : "ko".equals(requested) ? List.of("ko") : List.of(requested, "ko")) {
+            try {
+                TourApiLocale locale = resolveLocale(lang);
+                List<String> storyTypes = "ko".equals(lang) ? List.of("12", "14") : List.of("76", "78");
+                String keyword = java.util.Arrays.stream(title.split("[()\\n]"))
+                        .map(String::trim)
+                        .filter(part -> !part.isBlank())
+                        .filter(part -> !"ko".equals(lang) || part.matches(".*\\p{IsHangul}.*"))
+                        .findFirst()
+                        .orElse(title.trim());
+                for (String storyType : storyTypes) {
+                    URI search = UriComponentsBuilder.fromUriString(locale.baseUrl() + "/searchKeyword2")
+                            .queryParam("MobileOS", "AND").queryParam("MobileApp", "Ansik")
+                            .queryParam("_type", "json").queryParam("numOfRows", 100).queryParam("pageNo", 1)
+                            .queryParam("contentTypeId", storyType)
+                            .queryParam("keyword", URLEncoder.encode(
+                                    "ko".equals(lang) ? normalizeTourName(keyword) : keyword,
+                                    StandardCharsets.UTF_8))
+                            .queryParam("arrange", "E").queryParam("serviceKey", tourApiKey).build(true).toUri();
+                    JsonNode items = mapper.readTree(requestValidBody(search)).path("response").path("body").path("items").path("item");
+                    if (!items.isArray()) continue;
+                    for (JsonNode item : items) {
+                    String type = item.path("contenttypeid").asText();
+                    // Attractions and cultural facilities only; a restaurant overview is not a heritage story.
+                    if (!Set.of("12", "14", "76", "78").contains(type)) continue;
+                    String name = normalizeTourName(item.path("title").asText());
+                    boolean matches = java.util.Arrays.stream(title.split("[()\\n]"))
+                            .map(this::normalizeTourName).anyMatch(part -> !part.isBlank() && part.equals(name));
+                    if (!matches) continue;
+                    String id = item.path("contentid").asText();
+                    URI detail = UriComponentsBuilder.fromUriString(locale.baseUrl() + "/detailCommon2")
+                            .queryParam("MobileOS", "AND").queryParam("MobileApp", "Ansik")
+                            .queryParam("_type", "json").queryParam("contentId", id)
+                            .queryParam("serviceKey", tourApiKey).build(true).toUri();
+                    JsonNode details = mapper.readTree(requestValidBody(detail)).path("response").path("body").path("items").path("item");
+                    if (!details.isArray() || details.isEmpty()) continue;
+                    String overview = details.get(0).path("overview").asText("").trim();
+                    if (overview.isBlank()) continue;
+                    List<String> images = new ArrayList<>();
+                    String first = item.path("firstimage").asText("");
+                    if (!first.isBlank()) images.add(first);
+                    images.addAll(getTourOfficialImages(id, lang));
+                    return new PlaceStory(item.path("title").asText(title), overview,
+                            images.stream().distinct().limit(8).toList(), lang);
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("[PLACE STORY] 조회 실패 - title={}, language={}, error={}", title, lang, e.getClass().getSimpleName());
+            }
+        }
+        return new PlaceStory(title, "", List.of(), requested);
     }
 
     public ResponseEntity<String> getNearbyRestaurants(
@@ -231,9 +309,28 @@ public class TourService {
             rankedNames.add(normalizedName);
         }
 
-        List<TourCourseCandidate> result = ranked.values().stream()
+        List<TourCourseCandidate> result = new ArrayList<>(ranked.values().stream()
                 .limit(MAX_COURSE_CANDIDATES)
+                .toList());
+        List<TourCourseCandidate> restaurantCandidates = nearby.stream()
+                .filter(candidate -> "RESTAURANT".equals(candidate.category()))
+                .filter(candidate -> result.stream().noneMatch(value -> value.id().equals(candidate.id())))
+                .limit(7)
                 .toList();
+        for (TourCourseCandidate restaurant : restaurantCandidates) {
+            if (result.size() >= MAX_COURSE_CANDIDATES) {
+                int replaceIndex = -1;
+                for (int index = result.size() - 1; index >= 0; index--) {
+                    if (!"RESTAURANT".equals(result.get(index).category())) {
+                        replaceIndex = index;
+                        break;
+                    }
+                }
+                if (replaceIndex < 0) break;
+                result.remove(replaceIndex);
+            }
+            result.add(withRanking(restaurant, 4000 + result.size(), "TOURAPI_NEARBY"));
+        }
         long verifiedCount = result.stream()
                 .filter(candidate -> !"TOURAPI_NEARBY".equals(candidate.selectionBasis()))
                 .count();
@@ -563,9 +660,12 @@ public class TourService {
     }
 
     private String requestValidBody(URI uri) {
-        String body = bulkhead == null
-                ? restTemplate.getForEntity(uri, String.class).getBody()
-                : bulkhead.tourApi(() -> restTemplate.getForEntity(uri, String.class).getBody());
+        byte[] responseBytes = bulkhead == null
+                ? restTemplate.getForEntity(uri, byte[].class).getBody()
+                : bulkhead.tourApi(() -> restTemplate.getForEntity(uri, byte[].class).getBody());
+        String body = responseBytes == null
+                ? null
+                : new String(responseBytes, StandardCharsets.UTF_8);
         if (isInvalidTourResponse(body)) {
             throw new IllegalStateException("TourAPI returned an invalid response");
         }

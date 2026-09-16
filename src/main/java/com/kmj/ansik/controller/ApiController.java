@@ -82,10 +82,15 @@ public class ApiController {
     ) {
         List<String> images = new ArrayList<>();
 
-        if (tourId != null && !tourId.isBlank()) {
+        if (tourId != null && tourId.matches("[0-9]+")) {
             images.addAll(tourService.getTourOfficialImages(tourId, lang));
         }
 
+        if (images.isEmpty() && title != null && !title.isBlank()) {
+            images.addAll(tourService.findOfficialPlaceImages(title, mapY, mapX));
+        }
+        // Keep Google candidates behind the official images. A non-empty TourAPI URL
+        // is not proof that the remote image is still loadable on the device.
         if (images.size() < 3 && title != null && !title.isBlank()) {
             images.addAll(googlePlaceService.getPlaceImages(title, mapY, mapX));
         }
@@ -97,6 +102,17 @@ public class ApiController {
                         .limit(10)
                         .toList()
         );
+    }
+
+    @GetMapping(value = "/place/story", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<TourService.PlaceStory> getPlaceStory(
+            @RequestParam String title, @RequestParam double mapX, @RequestParam double mapY,
+            @RequestParam(defaultValue = "ko") String lang) {
+        if (title.isBlank() || !Double.isFinite(mapX) || !Double.isFinite(mapY)
+                || mapX < 124 || mapX > 132 || mapY < 32 || mapY > 39) {
+            return ResponseEntity.badRequest().build();
+        }
+        return ResponseEntity.ok(tourService.getPlaceStory(title, mapY, mapX, lang));
     }
 
     @GetMapping(value = "/restaurants/nearby", produces = MediaType.APPLICATION_JSON_VALUE)
@@ -124,14 +140,6 @@ public class ApiController {
                         restaurantName, address, lang, menuHints, healthConditions
                 )
         );
-    }
-
-    @GetMapping(value = "/tour/menu-images", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<List<String>> getTourMenuImages(
-            @RequestParam String contentId,
-            @RequestParam(defaultValue = "ko") String lang
-    ) {
-        return ResponseEntity.ok(tourService.getTourMenuImages(contentId, lang));
     }
 
     @GetMapping(value = "/tour/location", produces = MediaType.APPLICATION_JSON_VALUE)
@@ -169,8 +177,4 @@ public class ApiController {
         return ResponseEntity.ok(openAiMenuProfileService.getProfile(menuName, lang));
     }
 
-    @GetMapping(value = "/menu/images", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<List<String>> getMenuImages(@RequestParam String menuName) {
-        return ResponseEntity.ok(naverService.getMenuImages(menuName));
-    }
 }

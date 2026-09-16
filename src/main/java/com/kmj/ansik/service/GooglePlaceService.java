@@ -14,19 +14,16 @@ import org.springframework.web.util.UriComponentsBuilder;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
-import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
 public class GooglePlaceService {
 
     private static final Logger log = LoggerFactory.getLogger(GooglePlaceService.class);
-    private static final int DAILY_API_LIMIT = 100;
     private static final int IMAGE_CACHE_MAX_SIZE = 1000;
     private static final int MAX_IMAGES = 3;
 
@@ -44,9 +41,6 @@ public class GooglePlaceService {
                 }
             }
     );
-
-    private final AtomicInteger dailyApiCount = new AtomicInteger(0);
-    private volatile LocalDate lastResetDate = LocalDate.now();
 
     public GooglePlaceService() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -66,11 +60,6 @@ public class GooglePlaceService {
         if (cached != null) {
             log.info("[GOOGLE API] 이미지 캐시 사용 - {}", placeName);
             return cached;
-        }
-
-        if (!checkAndIncrementQuota()) {
-            log.warn("[GOOGLE API] 하루 호출 제한 도달 - {}", placeName);
-            return Collections.emptyList();
         }
 
         List<String> images = new ArrayList<>();
@@ -94,13 +83,25 @@ public class GooglePlaceService {
             }
 
             JsonNode root = mapper.readTree(response);
+            String status = root.path("status").asText("");
             JsonNode results = root.path("results");
 
             if (!results.isArray() || results.isEmpty()) {
+                log.warn(
+                        "[GOOGLE API] 장소 검색 결과 없음 - place='{}', status='{}', message='{}'",
+                        placeName,
+                        status,
+                        root.path("error_message").asText("")
+                );
                 return Collections.emptyList();
             }
 
-            JsonNode photos = results.get(0).path("photos");
+            JsonNode match = chooseBestCandidate(results, cleanName, lat, lng);
+            if (match == null) {
+                log.warn("[GOOGLE API] 좌표와 일치하는 사진 장소 없음 - place='{}'", placeName);
+                return Collections.emptyList();
+            }
+            JsonNode photos = match.path("photos");
             if (!photos.isArray()) {
                 return Collections.emptyList();
             }
@@ -130,6 +131,82 @@ public class GooglePlaceService {
         return Collections.emptyList();
     }
 
+    /**
+     * Prefer an exact localized name, but allow a coordinate match for translated
+     * names (for example "Junggu Office" and "중구청"). Text Search is already
+     * biased to the supplied point, so a photographed result within 250 m is a
+     * safer fallback than discarding every non-identical localized name.
+     */
+    private JsonNode chooseBestCandidate(JsonNode results, String placeName, double lat, double lng) {
+        String expected = normalizeName(placeName);
+        boolean hasCoordinates = isValidCoordinate(lat, lng);
+        JsonNode nearestCoordinateMatch = null;
+        double nearestMeters = Double.MAX_VALUE;
+
+        for (JsonNode candidate : results) {
+            if (!candidate.path("photos").isArray() || candidate.path("photos").isEmpty()) {
+                continue;
+            }
+
+            String actual = normalizeName(candidate.path("name").asText(""));
+            double meters = candidateDistanceMeters(candidate, lat, lng);
+            boolean closeByName = actual.equals(expected)
+                    || (!actual.isBlank() && !expected.isBlank()
+                    && (actual.contains(expected) || expected.contains(actual)));
+
+            if (closeByName && (!hasCoordinates || meters <= 1500)) {
+                return candidate;
+            }
+            if (hasCoordinates && meters <= 250 && meters < nearestMeters) {
+                nearestCoordinateMatch = candidate;
+                nearestMeters = meters;
+            }
+        }
+
+        if (nearestCoordinateMatch != null) {
+            log.info(
+                    "[GOOGLE API] 번역명 좌표 매칭 사용 - requested='{}', matched='{}', distance={}m",
+                    placeName,
+                    nearestCoordinateMatch.path("name").asText(""),
+                    Math.round(nearestMeters)
+            );
+            return nearestCoordinateMatch;
+        }
+
+        if (!hasCoordinates) {
+            for (JsonNode candidate : results) {
+                if (candidate.path("photos").isArray() && !candidate.path("photos").isEmpty()) {
+                    return candidate;
+                }
+            }
+        }
+        return null;
+    }
+
+    private String normalizeName(String name) {
+        return name == null ? "" : name.toLowerCase(java.util.Locale.ROOT)
+                .replaceAll("[^\\p{L}\\p{N}]", "");
+    }
+
+    private boolean isValidCoordinate(double lat, double lng) {
+        return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180
+                && !(lat == 0.0 && lng == 0.0);
+    }
+
+    private double candidateDistanceMeters(JsonNode candidate, double lat, double lng) {
+        if (!isValidCoordinate(lat, lng)) return Double.MAX_VALUE;
+        JsonNode point = candidate.path("geometry").path("location");
+        double candidateLat = point.path("lat").asDouble(0);
+        double candidateLng = point.path("lng").asDouble(0);
+        if (!isValidCoordinate(candidateLat, candidateLng)) return Double.MAX_VALUE;
+
+        double dLat = Math.toRadians(candidateLat - lat);
+        double dLng = Math.toRadians(candidateLng - lng);
+        double a = Math.pow(Math.sin(dLat / 2), 2) + Math.cos(Math.toRadians(lat))
+                * Math.cos(Math.toRadians(candidateLat)) * Math.pow(Math.sin(dLng / 2), 2);
+        return 6371000 * 2 * Math.asin(Math.min(1, Math.sqrt(a)));
+    }
+
     private String buildCacheKey(String placeName, double lat, double lng) {
         return placeName.trim().toLowerCase() + "_" + lat + "_" + lng;
     }
@@ -139,23 +216,6 @@ public class GooglePlaceService {
                 .replaceAll("\\s*\\(.*?\\)\\s*", "")
                 .replaceAll("\\s*\\[.*?\\]\\s*", "")
                 .trim();
-    }
-
-    private synchronized boolean checkAndIncrementQuota() {
-        LocalDate today = LocalDate.now();
-
-        if (!today.equals(lastResetDate)) {
-            lastResetDate = today;
-            dailyApiCount.set(0);
-        }
-
-        if (dailyApiCount.get() >= DAILY_API_LIMIT) {
-            return false;
-        }
-
-        int used = dailyApiCount.incrementAndGet();
-        log.info("[GOOGLE API] 오늘 사용량: {}/{}", used, DAILY_API_LIMIT);
-        return true;
     }
 
     private String resolveGooglePhotoRedirect(String photoReference) {

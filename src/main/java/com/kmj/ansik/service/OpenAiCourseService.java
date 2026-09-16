@@ -80,6 +80,7 @@ public class OpenAiCourseService {
         List<String> preferences = cleanList(request.preferences(), 8, 60);
         List<String> healthConditions = cleanList(request.healthConditions(), 20, 80);
         String language = normalizeLanguage(request.language());
+        boolean restaurantRequired = wantsRestaurants(preferences);
 
         if (cityCode.isBlank() || cityName.isBlank()) {
             return AiCourseDto.unavailable(cityCode, cityName, nights, days, preferences, "INVALID_REQUEST");
@@ -93,11 +94,11 @@ public class OpenAiCourseService {
                 existingSchedule, allCandidates, days
         );
         List<TourCourseCandidate> qualityCandidates = qualityCandidatePool(
-                allCandidates, scheduledCandidates, days * stopsPerDay
+                allCandidates, scheduledCandidates, days * stopsPerDay, restaurantRequired
         );
         int candidateLimit = Math.min(100, Math.max(48, days * stopsPerDay * 2));
         List<TourCourseCandidate> candidates = prioritizeCandidates(
-                qualityCandidates, scheduledCandidates, candidateLimit
+                qualityCandidates, scheduledCandidates, candidateLimit, restaurantRequired, days
         );
         if (candidates.size() < days * stopsPerDay) {
             log.warn("[OPENAI COURSE] 관광 후보 부족 - cityCode={}, days={}, candidates={}",
@@ -114,7 +115,7 @@ public class OpenAiCourseService {
             body.put("store", false);
             body.put("max_output_tokens", Math.min(5200, 1100 + days * stopsPerDay * 95));
             body.set("reasoning", mapper.createObjectNode().put("effort", "low"));
-            body.put("instructions", instructions(language, days, stopsPerDay));
+            body.put("instructions", instructions(language, days, stopsPerDay, restaurantRequired));
             body.put("input", requestInput(
                     cityName, nights, days, stopsPerDay, existingSchedule,
                     preferences, healthConditions, candidates, scheduledCandidates
@@ -150,6 +151,9 @@ public class OpenAiCourseService {
             );
             itinerary = enforceScheduledCandidates(
                     itinerary, scheduledCandidates, candidates, days, stopsPerDay
+            );
+            itinerary = enforceRestaurantPreference(
+                    itinerary, scheduledCandidates, candidates, restaurantRequired, language
             );
             if (itinerary.size() != days || itinerary.stream().anyMatch(day -> day.stops().size() != stopsPerDay)) {
                 log.warn("[OPENAI COURSE] 불완전한 일정 응답 - requestedDays={}, returnedDays={}",
@@ -276,7 +280,10 @@ public class OpenAiCourseService {
         return format;
     }
 
-    private String instructions(String language, int days, int stopsPerDay) {
+    private String instructions(String language, int days, int stopsPerDay, boolean restaurantRequired) {
+        String restaurantRule = restaurantRequired
+                ? "The user explicitly selected a food preference. Include at least one RESTAURANT candidate on every day. This is mandatory."
+                : "Restaurants are optional unless they improve the requested itinerary.";
         return """
                 Create a practical %d-day travel itinerary using only candidateId values in the supplied TourAPI candidate list.
                 Never invent a place, address, coordinate, opening hour, price, menu, accessibility feature, or medical fact.
@@ -294,17 +301,18 @@ public class OpenAiCourseService {
                 Correct obvious spelling variants only when strongly supported by candidate names. A neighborhood plus an activity (for example, "Seongsu cafe" or "Han River picnic") is a soft constraint: choose a suitable candidate in that area and category.
                 Do not ignore a vague line. Preserve its intent and supplement missing details with nearby TourAPI candidates.
                 Only fill schedule gaps or unavailable generic requests with other candidates. Detailed days in the user's schedule must remain recognizably the same.
-                Restaurants may be included, but healthNote must be cautious because exact menus and recipes are not provided.
+                %s Health notes for restaurants must be cautious because exact menus and recipes are not provided.
                 Compare the plan with supplied health conditions without diagnosing. Mention pacing, rest, diet, allergens, or mobility only when relevant.
                 Keep every reason and tip concise. Explain the overall selection rationale and give practical touring advice.
                 Output all human-readable text in %s.
-                """.formatted(days, stopsPerDay, language);
+                """.formatted(days, stopsPerDay, restaurantRule, language);
     }
 
     private List<TourCourseCandidate> qualityCandidatePool(
             List<TourCourseCandidate> allCandidates,
             List<ScheduledCandidate> scheduledCandidates,
-            int requiredCount
+            int requiredCount,
+            boolean restaurantRequired
     ) {
         Set<String> scheduledIds = scheduledCandidates.stream()
                 .map(ScheduledCandidate::candidateId)
@@ -316,6 +324,7 @@ public class OpenAiCourseService {
 
         List<TourCourseCandidate> result = allCandidates.stream()
                 .filter(candidate -> scheduledIds.contains(candidate.id())
+                        || (restaurantRequired && "RESTAURANT".equals(candidate.category()))
                         || !"TOURAPI_NEARBY".equals(candidate.selectionBasis()))
                 .toList();
         log.info("[OPENAI COURSE] 품질 후보 제한 - total={}, evidenceRanked={}, selectedPool={}",
@@ -351,7 +360,9 @@ public class OpenAiCourseService {
     private List<TourCourseCandidate> prioritizeCandidates(
             List<TourCourseCandidate> allCandidates,
             List<ScheduledCandidate> scheduledCandidates,
-            int limit
+            int limit,
+            boolean restaurantRequired,
+            int days
     ) {
         Map<String, TourCourseCandidate> byId = new HashMap<>();
         allCandidates.forEach(candidate -> byId.put(candidate.id(), candidate));
@@ -361,6 +372,16 @@ public class OpenAiCourseService {
             if (candidate != null && result.stream().noneMatch(value -> value.id().equals(candidate.id()))) {
                 result.add(candidate);
             }
+        }
+        if (restaurantRequired) {
+            allCandidates.stream()
+                    .filter(candidate -> "RESTAURANT".equals(candidate.category()))
+                    .limit(days)
+                    .forEach(candidate -> {
+                        if (result.size() < limit && result.stream().noneMatch(value -> value.id().equals(candidate.id()))) {
+                            result.add(candidate);
+                        }
+                    });
         }
         for (TourCourseCandidate candidate : allCandidates) {
             if (result.size() >= limit) break;
@@ -569,6 +590,93 @@ public class OpenAiCourseService {
         return result;
     }
 
+    private boolean wantsRestaurants(List<String> preferences) {
+        return preferences.stream()
+                .map(value -> value.toLowerCase(Locale.ROOT))
+                .anyMatch(value -> value.contains("맛집") || value.contains("음식")
+                        || value.contains("food") || value.contains("restaurant")
+                        || value.contains("gourmet") || value.contains("グルメ")
+                        || value.contains("飲食") || value.contains("美食")
+                        || value.contains("餐厅") || value.contains("餐廳"));
+    }
+
+    private List<CourseDay> enforceRestaurantPreference(
+            List<CourseDay> itinerary,
+            List<ScheduledCandidate> scheduledCandidates,
+            List<TourCourseCandidate> candidates,
+            boolean restaurantRequired,
+            String language
+    ) {
+        if (!restaurantRequired) return itinerary;
+        Set<String> lockedIds = scheduledCandidates.stream()
+                .map(ScheduledCandidate::candidateId)
+                .collect(java.util.stream.Collectors.toSet());
+        Set<String> usedIds = itinerary.stream()
+                .flatMap(day -> day.stops().stream())
+                .map(CourseStop::id)
+                .collect(java.util.stream.Collectors.toCollection(HashSet::new));
+        List<TourCourseCandidate> restaurants = candidates.stream()
+                .filter(candidate -> "RESTAURANT".equals(candidate.category()))
+                .toList();
+        List<CourseDay> result = new ArrayList<>();
+
+        for (CourseDay day : itinerary) {
+            if (day.stops().stream().anyMatch(stop -> "RESTAURANT".equals(stop.category()))) {
+                result.add(day);
+                continue;
+            }
+            TourCourseCandidate restaurant = restaurants.stream()
+                    .filter(candidate -> !usedIds.contains(candidate.id()))
+                    .findFirst()
+                    .orElse(null);
+            List<CourseStop> stops = new ArrayList<>(day.stops());
+            int replaceIndex = -1;
+            for (int index = stops.size() - 1; index >= 0; index--) {
+                CourseStop stop = stops.get(index);
+                if (!lockedIds.contains(stop.id()) && !"RESTAURANT".equals(stop.category())) {
+                    replaceIndex = index;
+                    break;
+                }
+            }
+            if (restaurant == null || replaceIndex < 0) {
+                log.warn("[OPENAI COURSE] 맛집 선호 보정 실패 - day={}, restaurantCandidates={}, replaceable={}",
+                        day.day(), restaurants.size(), replaceIndex >= 0);
+                result.add(day);
+                continue;
+            }
+
+            CourseStop replaced = stops.get(replaceIndex);
+            usedIds.remove(replaced.id());
+            usedIds.add(restaurant.id());
+            CourseStop mealStop = new CourseStop(
+                    restaurant.id(), restaurant.name(), restaurant.address(), restaurant.category(),
+                    restaurant.imageUrl(), restaurant.latitude(), restaurant.longitude(),
+                    replaced.recommendedTime(), restaurantReason(language), "", restaurantHealthNote(language)
+            );
+            stops.set(replaceIndex, mealStop);
+            result.add(new CourseDay(day.day(), day.theme(), stops));
+        }
+        return result;
+    }
+
+    private String restaurantReason(String language) {
+        return switch (language) {
+            case "en" -> "Included because local food was selected.";
+            case "ja" -> "グルメの希望に合わせて追加しました。";
+            case "zh-CN" -> "根据所选美食偏好加入行程。";
+            default -> "선택한 맛집 선호를 반영해 일정에 포함했어요.";
+        };
+    }
+
+    private String restaurantHealthNote(String language) {
+        return switch (language) {
+            case "en" -> "Check current menus, ingredients, and allergens with the restaurant.";
+            case "ja" -> "現在のメニュー、食材、アレルゲンは店舗にご確認ください。";
+            case "zh-CN" -> "请向餐厅确认当前菜单、食材和过敏原。";
+            default -> "현재 메뉴와 식재료·알레르기 성분은 식당에 확인하세요.";
+        };
+    }
+
     private CourseStop courseStop(TourCourseCandidate place) {
         return new CourseStop(
                 place.id(), place.name(), place.address(), place.category(), place.imageUrl(),
@@ -588,19 +696,7 @@ public class OpenAiCourseService {
 
     private List<CourseStop> optimizeRoute(List<CourseStop> stops) {
         if (stops.size() < 3) return withSequentialTimes(stops);
-        // The AI's first stop usually carries a morning/meal-time intent. Keep it fixed,
-        // then reduce unnecessary backtracking among the remaining selected places.
-        List<CourseStop> remaining = new ArrayList<>(stops.subList(1, stops.size()));
-        List<CourseStop> route = new ArrayList<>();
-        route.add(stops.get(0));
-        while (!remaining.isEmpty()) {
-            CourseStop current = route.get(route.size() - 1);
-            CourseStop next = remaining.stream()
-                    .min(java.util.Comparator.comparingDouble(value -> distanceKm(current, value)))
-                    .orElseThrow();
-            route.add(next);
-            remaining.remove(next);
-        }
+        List<CourseStop> route = RouteTimingPolicy.order(stops);
         double distance = routeDistanceKm(route);
         log.info("[OPENAI COURSE] 일자 동선 최적화 - stops={}, routeDistanceKm={}",
                 stops.size(), String.format(Locale.ROOT, "%.1f", distance));
@@ -608,25 +704,7 @@ public class OpenAiCourseService {
     }
 
     private List<CourseStop> withSequentialTimes(List<CourseStop> stops) {
-        String[][] schedules = {
-                {}, {}, {},
-                {"10:00", "14:00", "18:00"},
-                {"09:30", "12:00", "15:00", "18:00"},
-                {"09:00", "11:30", "14:00", "16:30", "19:00"},
-                {"09:00", "10:30", "12:00", "14:00", "16:30", "19:00"},
-                {"09:00", "10:30", "12:00", "14:00", "16:00", "18:00", "20:00"}
-        };
-        String[] timeSlots = schedules[Math.min(stops.size(), 7)];
-        List<CourseStop> result = new ArrayList<>();
-        for (int i = 0; i < stops.size(); i++) {
-            CourseStop stop = stops.get(i);
-            result.add(new CourseStop(
-                    stop.id(), stop.name(), stop.address(), stop.category(), stop.imageUrl(),
-                    stop.latitude(), stop.longitude(), timeSlots[Math.min(i, timeSlots.length - 1)],
-                    stop.reason(), stop.visitTip(), stop.healthNote()
-            ));
-        }
-        return result;
+        return RouteTimingPolicy.estimate(stops);
     }
 
     private double routeDistanceKm(List<CourseStop> stops) {

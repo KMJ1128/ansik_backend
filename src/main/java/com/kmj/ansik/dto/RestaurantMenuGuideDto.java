@@ -32,13 +32,13 @@ public record RestaurantMenuGuideDto(
             List<String> tasteTags,
             List<String> typicalIngredients,
             List<String> possibleAllergens,
-            List<String> imageUrls,
             List<String> sourceUrls,
             String confidence,
             String healthRiskLevel,
             String healthRiskSummary,
             List<String> healthRiskReasons,
-            List<String> questionsForRestaurant
+            List<String> questionsForRestaurant,
+            String displayName
     ) {
     }
 }

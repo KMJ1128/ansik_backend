@@ -45,7 +45,17 @@ public record AiCourseDto(
             String recommendedTime,
             String reason,
             String visitTip,
-            String healthNote
+            String healthNote,
+            int estimatedTransferMinutes,
+            int suggestedStayMinutes,
+            boolean timingEstimated,
+            boolean timingNeedsReview
     ) {
+        public CourseStop(String id, String name, String address, String category, String imageUrl,
+                          double latitude, double longitude, String recommendedTime,
+                          String reason, String visitTip, String healthNote) {
+            this(id, name, address, category, imageUrl, latitude, longitude, recommendedTime,
+                    reason, visitTip, healthNote, 0, 0, false, false);
+        }
     }
 }

@@ -32,10 +32,15 @@ public class AuthTokenFilter extends OncePerRequestFilter {
                 long userId = tokenService.verifyAccessToken(authorization.substring(7).trim());
                 request.setAttribute("authUserId", userId);
             } catch (AuthException invalidToken) {
-                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-                response.setContentType("application/json;charset=UTF-8");
-                response.getWriter().write("{\"status\":\"UNAUTHORIZED\",\"message\":\"로그인이 만료되었습니다.\"}");
-                return;
+                // Public map/image endpoints must keep working even when an old app
+                // session still sends an expired token. Only /auth/me requires a
+                // valid access token at filter level.
+                if (request.getRequestURI().endsWith("/api/auth/me")) {
+                    response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                    response.setContentType("application/json;charset=UTF-8");
+                    response.getWriter().write("{\"status\":\"UNAUTHORIZED\",\"message\":\"로그인이 만료되었습니다.\"}");
+                    return;
+                }
             }
         }
         filterChain.doFilter(request, response);

@@ -80,7 +80,7 @@ public class OpenAiMenuProfileService {
             return fallback;
         }
 
-        String cacheKey = (safeName + "|" + lang).toLowerCase(Locale.ROOT);
+        String cacheKey = ("localized-v2|" + safeName + "|" + lang).toLowerCase(Locale.ROOT);
         CacheEntry cached = cache.getIfPresent(cacheKey);
         if (cached != null && cached.expiresAt().isAfter(Instant.now())) {
             log.info("[OPENAI PROFILE] 캐시 사용 - menuName='{}', language={}", safeName, lang);
@@ -166,7 +166,7 @@ public class OpenAiMenuProfileService {
             String canonicalKoreanName = result.path("canonicalKoreanName").asText("").trim();
             NutritionInfo nutrition = nutritionService.findByKoreanFoodName(canonicalKoreanName).orElse(null);
             MenuProfileDto profile = new MenuProfileDto(
-                    menuName,
+                    result.path("displayName").asText(menuName),
                     canonicalKoreanName,
                     description,
                     stringList(result.path("tasteTags")),
@@ -197,7 +197,8 @@ public class OpenAiMenuProfileService {
                 Describe the general dish, taste, and typical ingredients. Do not claim a restaurant's exact recipe.
                 Do not invent unusual ingredients. List possible allergens only when they are directly implied by typical ingredients; otherwise return an empty array.
                 Never treat unrelated legal, real-estate, office, warehouse, or product text as a food explanation.
-                Write description, taste tags, ingredients, and allergens in language: %s.
+                Write displayName, description, taste tags, ingredients, and allergens in language: %s.
+                displayName must explain the dish name in that language, not only transliterate Korean.
                 Keep the description clear and under 45 words and return at most 8 items in each array.
                 """.formatted(language);
     }
@@ -209,13 +210,14 @@ public class OpenAiMenuProfileService {
                   "additionalProperties": false,
                   "properties": {
                     "isFood": {"type": "boolean"},
+                    "displayName": {"type": "string"},
                     "canonicalKoreanName": {"type": "string"},
                     "description": {"type": "string"},
                     "tasteTags": {"type": "array", "items": {"type": "string"}},
                     "typicalIngredients": {"type": "array", "items": {"type": "string"}},
                     "possibleAllergens": {"type": "array", "items": {"type": "string"}}
                   },
-                  "required": ["isFood", "canonicalKoreanName", "description", "tasteTags", "typicalIngredients", "possibleAllergens"]
+                  "required": ["isFood", "displayName", "canonicalKoreanName", "description", "tasteTags", "typicalIngredients", "possibleAllergens"]
                 }
                 """);
         ObjectNode format = mapper.createObjectNode();

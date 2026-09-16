@@ -11,7 +11,6 @@ import com.kmj.ansik.dto.RestaurantMenuGuideDto.MenuItem;
 import com.kmj.ansik.logging.ExternalApiLoggingInterceptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpEntity;
@@ -42,7 +41,6 @@ public class OpenAiRestaurantMenuService {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final RestTemplate restTemplate;
-    private final NaverService naverService;
     private final PersistentCacheService persistentCacheService;
     private final ExternalApiBulkhead bulkhead;
     private final Cache<String, CacheEntry> cache = Caffeine.newBuilder()
@@ -66,7 +64,6 @@ public class OpenAiRestaurantMenuService {
             PersistentCacheService persistentCacheService,
             ExternalApiBulkhead bulkhead
     ) {
-        this.naverService = naverService;
         this.persistentCacheService = persistentCacheService;
         this.bulkhead = bulkhead;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -322,7 +319,7 @@ public class OpenAiRestaurantMenuService {
 
             candidates.add(new MenuCandidate(
                     name,
-                    node.path("imageSearchQuery").asText(name).trim(),
+                    node.path("displayName").asText(name).trim(),
                     description,
                     stringList(node.path("tasteTags")),
                     stringList(node.path("typicalIngredients")),
@@ -335,41 +332,22 @@ public class OpenAiRestaurantMenuService {
                     stringList(node.path("questionsForRestaurant")).stream().limit(3).toList()
             ));
         }
-        Map<String, String> requestContext = MDC.getCopyOfContextMap();
-        return candidates.parallelStream()
-                .map(candidate -> withLoggingContext(requestContext, () -> new MenuItem(
-                            candidate.name(),
-                            candidate.description(),
-                            candidate.tasteTags(),
-                            candidate.typicalIngredients(),
-                            candidate.possibleAllergens(),
-                            naverService.getMenuImages(candidate.imageSearchQuery()),
-                            candidate.sourceUrls(),
-                            candidate.confidence(),
-                            candidate.healthRiskLevel(),
-                            candidate.healthRiskSummary(),
-                            candidate.healthRiskReasons(),
-                            candidate.questionsForRestaurant()
-                    )))
+        return candidates.stream()
+                .map(candidate -> new MenuItem(
+                        candidate.name(),
+                        candidate.description(),
+                        candidate.tasteTags(),
+                        candidate.typicalIngredients(),
+                        candidate.possibleAllergens(),
+                        candidate.sourceUrls(),
+                        candidate.confidence(),
+                        candidate.healthRiskLevel(),
+                        candidate.healthRiskSummary(),
+                        candidate.healthRiskReasons(),
+                        candidate.questionsForRestaurant(),
+                        candidate.displayName()
+                ))
                 .toList();
-    }
-
-    private <T> T withLoggingContext(Map<String, String> context, java.util.function.Supplier<T> action) {
-        Map<String, String> previous = MDC.getCopyOfContextMap();
-        try {
-            if (context == null) {
-                MDC.clear();
-            } else {
-                MDC.setContextMap(context);
-            }
-            return action.get();
-        } finally {
-            if (previous == null) {
-                MDC.clear();
-            } else {
-                MDC.setContextMap(previous);
-            }
-        }
     }
 
     private List<String> stringList(JsonNode node) {
@@ -400,7 +378,7 @@ public class OpenAiRestaurantMenuService {
                         "additionalProperties": false,
                         "properties": {
                           "name": {"type": "string"},
-                          "imageSearchQuery": {"type": "string"},
+                          "displayName": {"type": "string"},
                           "description": {"type": "string"},
                           "tasteTags": {"type": "array", "items": {"type": "string"}},
                           "typicalIngredients": {"type": "array", "items": {"type": "string"}},
@@ -412,7 +390,7 @@ public class OpenAiRestaurantMenuService {
                           "healthRiskReasons": {"type": "array", "items": {"type": "string"}},
                           "questionsForRestaurant": {"type": "array", "items": {"type": "string"}}
                         },
-                        "required": ["name", "imageSearchQuery", "description", "tasteTags", "typicalIngredients", "possibleAllergens", "sourceUrls", "confidence", "healthRiskLevel", "healthRiskSummary", "healthRiskReasons", "questionsForRestaurant"]
+                        "required": ["name", "displayName", "description", "tasteTags", "typicalIngredients", "possibleAllergens", "sourceUrls", "confidence", "healthRiskLevel", "healthRiskSummary", "healthRiskReasons", "questionsForRestaurant"]
                       }
                     }
                   },
@@ -460,12 +438,10 @@ public class OpenAiRestaurantMenuService {
         return """
                 Build a compact menu guide for travelers. %s
                 Never invent restaurant-specific menus or recipes. Explain each listed dish generally.
+                Keep name exactly as the original Korean menu for ordering and matching.
+                Set displayName to a concise, understandable dish name in the output language.
+                For English, Japanese and Chinese, translate the food meaning, not just Korean pronunciation.
                 Include a short description, taste tags, typical ingredients, and only directly implied possible allergens.
-                For imageSearchQuery, return only the canonical dish name most likely to retrieve a photo of that exact food.
-                Prefer the standard Korean dish name when one exists, even when the output language is not Korean.
-                Remove restaurant brands, neighborhood names, marketing adjectives, and proprietary prefixes from imageSearchQuery.
-                Example: '신당동떡볶이' or '열불떡볶이' should use '떡볶이'; '하니 보쌈' should use '보쌈'.
-                Never include the restaurant name, address, price, 'etc.', representative-menu labels, or set/course labels in imageSearchQuery.
                 %s
                 Use empty arrays when uncertain. Output language: %s. Maximum 6 menus; descriptions under 45 words.
                 """.formatted(evidenceRule, healthRule, language);
@@ -513,7 +489,7 @@ public class OpenAiRestaurantMenuService {
             List<String> menuHints,
             List<String> healthConditions
     ) {
-        return (name + "|" + address + "|" + language + "|" + String.join("|", menuHints)
+        return ("menu-v5|" + name + "|" + address + "|" + language + "|" + String.join("|", menuHints)
                 + "|health:" + String.join("|", healthConditions))
                 .toLowerCase(Locale.ROOT)
                 .replaceAll("\\s+", " ")
@@ -554,10 +530,10 @@ public class OpenAiRestaurantMenuService {
 
     private String disclaimer(String language) {
         return switch (language) {
-            case "en" -> "Menus are based on public web sources. Images and general ingredient information may differ from the restaurant's current offering and recipe. Confirm prices and allergens with the restaurant.";
-            case "ja" -> "公開ウェブ情報を基にしたメニューです。画像や一般的な食材情報は、店舗の現在の提供内容・レシピと異なる場合があります。価格とアレルゲンは店舗にご確認ください。";
-            case "zh-CN" -> "菜单信息基于公开网页资料。图片和一般食材信息可能与餐厅当前供应及实际配方不同，价格和过敏原请向餐厅确认。";
-            default -> "공개 웹 자료를 바탕으로 정리한 메뉴입니다. 이미지와 일반 재료 정보는 식당의 현재 판매 내용·실제 조리법과 다를 수 있으므로 가격과 알레르기 성분은 식당에 확인하세요.";
+            case "en" -> "Menus are based on public web sources. General ingredient information may differ from the restaurant's current offering and recipe. Confirm prices and allergens with the restaurant.";
+            case "ja" -> "公開ウェブ情報を基にしたメニューです。一般的な食材情報は、店舗の現在の提供内容・レシピと異なる場合があります。価格とアレルゲンは店舗にご確認ください。";
+            case "zh-CN" -> "菜单信息基于公开网页资料。一般食材信息可能与餐厅当前供应及实际配方不同，价格和过敏原请向餐厅确认。";
+            default -> "공개 웹 자료를 바탕으로 정리한 메뉴입니다. 일반 재료 정보는 식당의 현재 판매 내용·실제 조리법과 다를 수 있으므로 가격과 알레르기 성분은 식당에 확인하세요.";
         };
     }
 
@@ -566,7 +542,7 @@ public class OpenAiRestaurantMenuService {
 
     private record MenuCandidate(
             String name,
-            String imageSearchQuery,
+            String displayName,
             String description,
             List<String> tasteTags,
             List<String> typicalIngredients,
