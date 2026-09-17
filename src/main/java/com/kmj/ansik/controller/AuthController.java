@@ -10,6 +10,7 @@ import com.kmj.ansik.service.AuthService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestAttribute;
@@ -47,5 +48,14 @@ public class AuthController {
     public AuthUserDto me(@RequestAttribute(name = "authUserId", required = false) Long userId) {
         if (userId == null) throw new AuthException(HttpStatus.UNAUTHORIZED, "로그인이 필요합니다.");
         return authService.currentUser(userId);
+    }
+
+    @DeleteMapping("/me")
+    public ResponseEntity<Void> deleteMe(
+            @RequestAttribute(name = "authUserId", required = false) Long userId
+    ) {
+        if (userId == null) throw new AuthException(HttpStatus.UNAUTHORIZED, "로그인이 필요합니다.");
+        authService.deleteAccount(userId);
+        return ResponseEntity.noContent().build();
     }
 }

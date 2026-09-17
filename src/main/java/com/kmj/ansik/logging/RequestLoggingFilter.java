@@ -26,7 +26,9 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
     private static final Set<String> REDACTED_PARAMETER_NAMES = Set.of(
             "key", "apikey", "api_key", "servicekey", "token", "authorization",
             "password", "secret", "clientsecret", "client_secret",
-            "mapx", "mapy", "lat", "lng", "latitude", "longitude"
+            "mapx", "mapy", "lat", "lng", "latitude", "longitude",
+            "healthconditions", "healthcondition", "allergy", "allergies",
+            "disease", "diseases", "medicalcondition", "medicalconditions"
     );
 
     @Override
@@ -95,7 +97,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
                 .sorted(Comparator.comparing(java.util.Map.Entry::getKey))
                 .forEach(entry -> {
                     String name = entry.getKey();
-                    String normalizedName = name.toLowerCase(Locale.ROOT).replace("-", "");
+                    String normalizedName = name.toLowerCase(Locale.ROOT).replace("-", "").replace("_", "");
                     String value = REDACTED_PARAMETER_NAMES.contains(normalizedName)
                             ? "***"
                             : abbreviate(String.join(",", entry.getValue()), 160);

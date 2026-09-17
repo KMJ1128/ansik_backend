@@ -35,7 +35,8 @@ public class AuthService {
         );
         AuthUserDto user = repository.upsertSocialUser(identity, request.language());
         AuthResponse response = issueSession(user, request.deviceId());
-        log.info("[AUTH] 소셜 로그인 성공 - userId={}, provider={}", user.id(), identity.provider());
+        log.info("[AUTH] 소셜 로그인 성공 - userId={}, provider={}, consentVersion={}",
+                user.id(), identity.provider(), request.consentVersion());
         return response;
     }
 
@@ -56,6 +57,14 @@ public class AuthService {
 
     public void logout(String refreshToken) {
         repository.revokeRefreshToken(tokenService.hash(refreshToken));
+    }
+
+    @Transactional
+    public void deleteAccount(long userId) {
+        if (!repository.deleteUser(userId)) {
+            throw new AuthException(HttpStatus.NOT_FOUND, "사용자를 찾을 수 없습니다.");
+        }
+        log.info("[AUTH] 계정 삭제 완료 - userId={}", userId);
     }
 
     private AuthResponse issueSession(AuthUserDto user, String deviceId) {
