@@ -49,7 +49,7 @@ class OpenAiCourseServiceTest {
     void excludesUnrankedNearbyFallbackWhenTourismEvidenceIsSufficient() throws Exception {
         OpenAiCourseService service = new OpenAiCourseService(new TourService());
         var method = OpenAiCourseService.class.getDeclaredMethod(
-                "qualityCandidatePool", List.class, List.class, int.class
+                "qualityCandidatePool", List.class, List.class, int.class, boolean.class
         );
         method.setAccessible(true);
         List<TourCourseCandidate> candidates = new java.util.ArrayList<>(
@@ -69,7 +69,7 @@ class OpenAiCourseServiceTest {
 
         @SuppressWarnings("unchecked")
         List<TourCourseCandidate> result = (List<TourCourseCandidate>) method.invoke(
-                service, candidates, List.of(), 15
+                service, candidates, List.of(), 15, false
         );
 
         assertThat(result).hasSize(15);
