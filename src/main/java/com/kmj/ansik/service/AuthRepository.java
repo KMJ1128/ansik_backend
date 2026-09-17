@@ -11,7 +11,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.PreparedStatement;
 import java.sql.Statement;
-import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -128,6 +127,11 @@ public class AuthRepository {
                    SET revoked_at = COALESCE(revoked_at, UTC_TIMESTAMP(6))
                  WHERE token_hash = ?
                 """, tokenHash);
+    }
+
+    @Transactional
+    public boolean deleteUser(long userId) {
+        return jdbc.update("DELETE FROM users WHERE id = ?", userId) > 0;
     }
 
     private AuthUserDto mapUser(java.sql.ResultSet rs) throws java.sql.SQLException {
