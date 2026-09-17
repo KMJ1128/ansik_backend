@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.mock;
 
 class MenuPresentationTest {
     @Test void rejectsVideoThumbnailsEvenWhenTheDishNameMatches() {
@@ -25,19 +25,19 @@ class MenuPresentationTest {
         assertThat(wrong).isZero();
         assertThat(matching).isGreaterThanOrEqualTo(120);
     }
-    @Test void translationDoesNotChangeTheOriginalNameOrImageQuery() throws Exception {
-        NaverService images = mock(NaverService.class);
-        when(images.getMenuImages("소불고기")).thenReturn(List.of("https://example.com/beef.jpg"));
-        var service = new OpenAiRestaurantMenuService(images);
+    @Test void translationDoesNotChangeTheOriginalName() throws Exception {
+        var service = new OpenAiRestaurantMenuService(mock(NaverService.class));
         var json = new ObjectMapper().readTree("""
                 [{"name":"소불고기","displayName":"Soy-marinated beef",
-                "description":"Thin beef cooked in a soy marinade.","imageSearchQuery":"소불고기"}]
+                "description":"Thin beef cooked in a soy marinade.","tasteTags":[],
+                "typicalIngredients":[],"possibleAllergens":[],"sourceUrls":[],
+                "confidence":"medium","healthRiskLevel":"unknown","healthRiskSummary":"",
+                "healthRiskReasons":[],"questionsForRestaurant":[]}]
                 """);
         List<MenuItem> result = ReflectionTestUtils.invokeMethod(service,"parseMenus",json,false);
         assertThat(result).hasSize(1);
         assertThat(result.get(0).name()).isEqualTo("소불고기");
         assertThat(result.get(0).displayName()).isEqualTo("Soy-marinated beef");
-        verify(images).getMenuImages("소불고기");
     }
     @Test void translationIsRequiredByStructuredOutputSchema() {
         JsonNode format = ReflectionTestUtils.invokeMethod(new OpenAiRestaurantMenuService(mock(NaverService.class)),"structuredOutputFormat");
