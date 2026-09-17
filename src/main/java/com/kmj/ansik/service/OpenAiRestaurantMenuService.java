@@ -539,7 +539,7 @@ public class OpenAiRestaurantMenuService {
             default -> "공개 웹 자료를 바탕으로 정리한 메뉴입니다. 일반 재료 정보는 식당의 현재 판매 내용·실제 조리법과 다를 수 있으므로 가격과 알레르기 성분은 식당에 확인하세요.";
         };
     }
-//
+//fe
     private record CacheEntry(RestaurantMenuGuideDto guide, Instant expiresAt) {
     }
 
