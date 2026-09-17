@@ -31,12 +31,12 @@ public class AuthService {
     @Transactional
     public AuthResponse socialLogin(SocialLoginRequest request) {
         ProviderIdentityService.ProviderIdentity identity = providerIdentityService.verify(
-                request.provider(), request.providerToken()
+                request.getProvider(), request.getProviderToken()
         );
-        AuthUserDto user = repository.upsertSocialUser(identity, request.language());
-        AuthResponse response = issueSession(user, request.deviceId());
+        AuthUserDto user = repository.upsertSocialUser(identity, request.getLanguage());
+        AuthResponse response = issueSession(user, request.getDeviceId());
         log.info("[AUTH] 소셜 로그인 성공 - userId={}, provider={}, consentVersion={}",
-                user.id(), identity.provider(), request.consentVersion());
+                user.id(), identity.provider(), request.getConsentVersion());
         return response;
     }
 
